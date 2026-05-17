@@ -568,6 +568,19 @@ export class CodeGraph {
     return kinds.reduce((sum, kind) => sum + (stats.nodesByKind[kind] ?? 0), 0);
   }
 
+  private async initializeSemanticSearchForQuery(): Promise<void> {
+    if (!this.isSemanticSearchEnabled() || !this.vectorManager || this.vectorManager.isInitialized()) {
+      return;
+    }
+
+    // Avoid a query embedding API call when the project has no document vectors.
+    if (this.vectorManager.getStats().totalVectors === 0) {
+      return;
+    }
+
+    await this.vectorManager.initialize();
+  }
+
   /**
    * Check if an indexing operation is currently in progress
    */
@@ -1092,6 +1105,8 @@ export class CodeGraph {
     query: string,
     options?: FindRelevantContextOptions
   ): Promise<Subgraph> {
+    await this.initializeSemanticSearchForQuery();
+
     // Update context builder with current vector manager
     this.contextBuilder = createContextBuilder(
       this.projectRoot,
@@ -1119,6 +1134,8 @@ export class CodeGraph {
     input: TaskInput,
     options?: BuildContextOptions
   ): Promise<TaskContext | string> {
+    await this.initializeSemanticSearchForQuery();
+
     // Update context builder with current vector manager
     this.contextBuilder = createContextBuilder(
       this.projectRoot,

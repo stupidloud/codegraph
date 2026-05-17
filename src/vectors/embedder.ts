@@ -11,6 +11,8 @@
 export const DEFAULT_MODEL = 'gemini-embedding-2';
 export const EMBEDDING_DIMENSION = 768;
 const GEMINI_EMBEDDING_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
+const MAX_REQUESTS_PER_MINUTE = 100;
+const MIN_REQUEST_INTERVAL_MS = Math.ceil(60_000 / MAX_REQUESTS_PER_MINUTE);
 
 /**
  * Options for the embedder
@@ -61,23 +63,22 @@ export interface BatchEmbeddingResult {
 }
 
 type GeminiEmbeddingResponse = {
-  embedding?: { values?: number[] };
   embeddings?: Array<{ values?: number[] }>;
 };
 
 /**
  * Text Embedder using Gemini.
  *
- * Gemini's embedContent endpoint returns one embedding for the provided content,
- * so batch generation intentionally calls it once per node text. Do not combine
- * multiple nodes into one content.parts array because that produces a single
- * aggregate embedding instead of node-level vectors.
+ * Batch generation uses batchEmbedContents with one request per node text. Do
+ * not combine multiple nodes into one content.parts array because that produces
+ * a single aggregate embedding instead of node-level vectors.
  */
 export class TextEmbedder {
   private apiKey?: string;
   private modelId: string;
   private dimension: number;
   private initialized = false;
+  private lastRequestAt = 0;
 
   constructor(options: EmbedderOptions = {}) {
     this.apiKey = options.apiKey;
@@ -125,14 +126,32 @@ export class TextEmbedder {
    * Generate embedding for a single text
    */
   async embed(text: string): Promise<EmbeddingResult> {
-    return this.embedPrepared(this.prepareText(text, 'document'));
+    const result = await this.embedBatch([text], 'document');
+    const embedding = result.embeddings[0];
+    if (!embedding) {
+      throw new Error('Gemini embedding response did not include values');
+    }
+    return {
+      embedding,
+      dimension: embedding.length,
+      model: result.model,
+    };
   }
 
   /**
    * Generate embedding for a query.
    */
   async embedQuery(query: string): Promise<EmbeddingResult> {
-    return this.embedPrepared(this.prepareText(query, 'search_query'));
+    const result = await this.embedBatch([query], 'search_query');
+    const embedding = result.embeddings[0];
+    if (!embedding) {
+      throw new Error('Gemini embedding response did not include values');
+    }
+    return {
+      embedding,
+      dimension: embedding.length,
+      model: result.model,
+    };
   }
 
   /**
@@ -156,12 +175,10 @@ export class TextEmbedder {
     }
 
     const startTime = Date.now();
-    const embeddings: Float32Array[] = [];
-
-    for (const text of texts) {
-      const result = await this.embedPrepared(this.prepareText(text, type));
-      embeddings.push(result.embedding);
-    }
+    const embeddings = await this.embedPreparedBatch(
+      texts.map((text) => this.prepareText(text)),
+      type
+    );
 
     return {
       embeddings,
@@ -171,12 +188,18 @@ export class TextEmbedder {
     };
   }
 
-  private async embedPrepared(text: string): Promise<EmbeddingResult> {
+  private async embedPreparedBatch(
+    texts: string[],
+    type: 'document' | 'search_query'
+  ): Promise<Float32Array[]> {
     if (!this.initialized) {
       throw new Error('Embedder not initialized. Call initialize() first.');
     }
 
-    const url = `${GEMINI_EMBEDDING_ENDPOINT}/${encodeURIComponent(this.modelId)}:embedContent`;
+    const url = `${GEMINI_EMBEDDING_ENDPOINT}/${encodeURIComponent(this.modelId)}:batchEmbedContents`;
+    const model = `models/${this.modelId}`;
+    const taskType = type === 'search_query' ? 'CODE_RETRIEVAL_QUERY' : 'RETRIEVAL_DOCUMENT';
+    await this.throttleRequests();
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -184,11 +207,14 @@ export class TextEmbedder {
         'x-goog-api-key': this.apiKey!,
       },
       body: JSON.stringify({
-        model: `models/${this.modelId}`,
-        content: {
-          parts: [{ text }],
-        },
-        output_dimensionality: this.dimension,
+        requests: texts.map((text) => ({
+          model,
+          content: {
+            parts: [{ text }],
+          },
+          taskType,
+          outputDimensionality: this.dimension,
+        })),
       }),
     });
 
@@ -198,30 +224,40 @@ export class TextEmbedder {
     }
 
     const json = await response.json() as GeminiEmbeddingResponse;
-    const values = json.embedding?.values ?? json.embeddings?.[0]?.values;
-    if (!values || values.length === 0) {
-      throw new Error('Gemini embedding response did not include values');
+    const values = json.embeddings?.map((embedding) => embedding.values);
+    if (!values || values.length !== texts.length) {
+      throw new Error('Gemini batch embedding response count did not match request count');
     }
 
-    const embedding = new Float32Array(values);
-    return {
-      embedding,
-      dimension: embedding.length,
-      model: this.modelId,
-    };
+    const embeddings = values.map((embeddingValues) => {
+      if (!embeddingValues || embeddingValues.length === 0) {
+        throw new Error('Gemini embedding response did not include values');
+      }
+      return new Float32Array(embeddingValues);
+    });
+
+    if (embeddings.some((embedding) => embedding.length !== embeddings[0]!.length)) {
+      throw new Error('Gemini batch embedding response contained mixed dimensions');
+    }
+
+    return embeddings;
+  }
+
+  private async throttleRequests(): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastRequestAt;
+    if (this.lastRequestAt > 0 && elapsed < MIN_REQUEST_INTERVAL_MS) {
+      await new Promise((resolve) => setTimeout(resolve, MIN_REQUEST_INTERVAL_MS - elapsed));
+    }
+    this.lastRequestAt = Date.now();
   }
 
   /**
    * Prepare text for retrieval-oriented embedding.
    */
-  private prepareText(text: string, type: 'document' | 'search_query'): string {
+  private prepareText(text: string): string {
     const maxLength = 8192;
-    const truncatedText = text.length > maxLength ? text.slice(0, maxLength) : text;
-
-    if (type === 'search_query') {
-      return `task: code retrieval | query: ${truncatedText}`;
-    }
-    return `task: code retrieval | document: ${truncatedText}`;
+    return text.length > maxLength ? text.slice(0, maxLength) : text;
   }
 
   /**

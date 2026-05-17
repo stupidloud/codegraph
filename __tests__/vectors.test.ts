@@ -102,10 +102,15 @@ describe('Vector Embeddings', () => {
         vi.restoreAllMocks();
       });
 
-      it('should call Gemini embedContent once per input text', async () => {
+      it('should call Gemini batchEmbedContents once for multiple input texts', async () => {
         const fetchMock = vi.fn(async () => ({
           ok: true,
-          json: async () => ({ embedding: { values: [0.1, 0.2, 0.3] } }),
+          json: async () => ({
+            embeddings: [
+              { values: [0.1, 0.2, 0.3] },
+              { values: [0.4, 0.5, 0.6] },
+            ],
+          }),
         })) as unknown as typeof fetch;
         global.fetch = fetchMock;
 
@@ -117,12 +122,79 @@ describe('Vector Embeddings', () => {
 
         const result = await embedder.embedBatch(['node one', 'node two'], 'document');
 
-        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
         expect(result.embeddings).toHaveLength(2);
-        const firstBody = JSON.parse((fetchMock as any).mock.calls[0][1].body);
-        expect(firstBody.output_dimensionality).toBe(3);
-        expect(firstBody.content.parts).toHaveLength(1);
-        expect(firstBody.content.parts[0].text).toContain('task: code retrieval | document:');
+        expect(result.embeddings[1]![0]).toBeCloseTo(0.4);
+        expect(result.embeddings[1]![1]).toBeCloseTo(0.5);
+        expect(result.embeddings[1]![2]).toBeCloseTo(0.6);
+        const url = (fetchMock as any).mock.calls[0][0];
+        expect(url).toContain(':batchEmbedContents');
+        const body = JSON.parse((fetchMock as any).mock.calls[0][1].body);
+        expect(body.requests).toHaveLength(2);
+        expect(body.requests[0].model).toBe('models/gemini-embedding-2');
+        expect(body.requests[0].outputDimensionality).toBe(3);
+        expect(body.requests[0].taskType).toBe('RETRIEVAL_DOCUMENT');
+        expect(body.requests[0].content.parts).toHaveLength(1);
+        expect(body.requests[0].content.parts[0].text).toBe('node one');
+        expect(body.requests[1].content.parts[0].text).toBe('node two');
+      });
+
+      it('should use CODE_RETRIEVAL_QUERY for query embeddings', async () => {
+        const fetchMock = vi.fn(async () => ({
+          ok: true,
+          json: async () => ({
+            embeddings: [
+              { values: [0.1, 0.2, 0.3] },
+            ],
+          }),
+        })) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        const embedder = new TextEmbedder({
+          apiKey: 'test-key',
+          outputDimensionality: 3,
+        });
+        await embedder.initialize();
+
+        await embedder.embedQuery('find auth code');
+
+        const body = JSON.parse((fetchMock as any).mock.calls[0][1].body);
+        expect(body.requests).toHaveLength(1);
+        expect(body.requests[0].taskType).toBe('CODE_RETRIEVAL_QUERY');
+      });
+
+      it('should throttle consecutive Gemini requests to 100 RPM', async () => {
+        vi.useFakeTimers();
+        const fetchMock = vi.fn(async () => ({
+          ok: true,
+          json: async () => ({
+            embeddings: [
+              { values: [0.1, 0.2, 0.3] },
+            ],
+          }),
+        })) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        try {
+          vi.setSystemTime(1_000);
+          const embedder = new TextEmbedder({
+            apiKey: 'test-key',
+            outputDimensionality: 3,
+          });
+          await embedder.initialize();
+
+          await embedder.embedBatch(['first'], 'document');
+          const second = embedder.embedBatch(['second'], 'document');
+
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(599);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(1);
+          await second;
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+        } finally {
+          vi.useRealTimers();
+        }
       });
 
       it('should require an API key before initialization', async () => {
