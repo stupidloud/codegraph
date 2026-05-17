@@ -49,7 +49,7 @@ export async function promptSemanticSearchConfig(
       apiKey: apiKey.trim(),
       model: 'gemini-embedding-2',
       outputDimensionality: 768,
-      batchSize: 32,
+      batchSize: 36,
     },
   };
 }

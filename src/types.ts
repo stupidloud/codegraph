@@ -726,7 +726,7 @@ export const DEFAULT_CONFIG: CodeGraphConfig = {
     provider: 'gemini',
     model: 'gemini-embedding-2',
     outputDimensionality: 768,
-    batchSize: 32,
+    batchSize: 36,
   },
 };
 

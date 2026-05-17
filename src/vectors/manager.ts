@@ -85,7 +85,7 @@ export class VectorManager {
     );
     this.queries = queries;
     this.nodeKinds = options.nodeKinds || DEFAULT_NODE_KINDS;
-    this.batchSize = options.batchSize || 32;
+    this.batchSize = options.batchSize || 36;
   }
 
   /**

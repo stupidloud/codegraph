@@ -54,7 +54,7 @@ Gemini API key
     "apiKey": "YOUR_GEMINI_API_KEY",
     "model": "gemini-embedding-2",
     "outputDimensionality": 768,
-    "batchSize": 32
+    "batchSize": 36
   }
 }
 ```
@@ -135,7 +135,7 @@ const cg = await CodeGraph.init('/path/to/project', {
       apiKey: process.env.GEMINI_API_KEY,
       model: 'gemini-embedding-2',
       outputDimensionality: 768,
-      batchSize: 32,
+      batchSize: 36,
     },
   },
 });
@@ -170,7 +170,7 @@ cg.close();
     "provider": "gemini",
     "model": "gemini-embedding-2",
     "outputDimensionality": 768,
-    "batchSize": 32
+    "batchSize": 36
   }
 }
 ```
