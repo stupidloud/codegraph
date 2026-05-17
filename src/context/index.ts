@@ -1,7 +1,7 @@
 /**
  * Context Builder
  *
- * Builds rich context for tasks by combining FTS search with graph traversal.
+ * Builds rich context for tasks by combining semantic search with graph traversal.
  * Outputs structured context ready to inject into Claude.
  */
 
@@ -22,6 +22,7 @@ import {
 } from '../types';
 import { QueryBuilder } from '../db/queries';
 import { GraphTraverser } from '../graph';
+import { VectorManager } from '../vectors';
 import { formatContextAsMarkdown, formatContextAsJson } from './formatter';
 import { logDebug } from '../errors';
 import { validatePathWithinRoot } from '../utils';
@@ -182,15 +183,18 @@ export class ContextBuilder {
   private projectRoot: string;
   private queries: QueryBuilder;
   private traverser: GraphTraverser;
+  private vectorManager: VectorManager | null;
 
   constructor(
     projectRoot: string,
     queries: QueryBuilder,
-    traverser: GraphTraverser
+    traverser: GraphTraverser,
+    vectorManager: VectorManager | null
   ) {
     this.projectRoot = projectRoot;
     this.queries = queries;
     this.traverser = traverser;
+    this.vectorManager = vectorManager;
   }
 
   /**
@@ -388,7 +392,21 @@ export class ContextBuilder {
       exactMatches = exactMatches.slice(0, Math.ceil(opts.searchLimit * 3));
     }
 
-    // Step 3: Run text search for natural language term matching
+    // Step 3: Try semantic search if vector manager is available
+    let semanticResults: SearchResult[] = [];
+    if (this.vectorManager && this.vectorManager.isInitialized()) {
+      try {
+        semanticResults = await this.vectorManager.search(query, {
+          limit: opts.searchLimit,
+          kinds: opts.nodeKinds && opts.nodeKinds.length > 0 ? opts.nodeKinds : undefined,
+        });
+        logDebug('Semantic search results', { count: semanticResults.length });
+      } catch (error) {
+        logDebug('Semantic search failed, falling back to text search', { query, error: String(error) });
+      }
+    }
+
+    // Step 4: Always run text search for natural language term matching
     // This catches file-name and node-name matches that semantic search may miss,
     // which is critical for template-heavy codebases (e.g., Liquid/Shopify themes)
     // where file names are the primary identifiers.
@@ -456,6 +474,17 @@ export class ContextBuilder {
 
     // Add text search results, upgrading scores for duplicates
     for (const result of textResults) {
+      const existing = resultById.get(result.node.id);
+      if (existing) {
+        existing.score = Math.max(existing.score, result.score);
+      } else {
+        resultById.set(result.node.id, result);
+        searchResults.push(result);
+      }
+    }
+
+    // Add semantic results
+    for (const result of semanticResults) {
       const existing = resultById.get(result.node.id);
       if (existing) {
         existing.score = Math.max(existing.score, result.score);
@@ -1123,9 +1152,10 @@ export class ContextBuilder {
 export function createContextBuilder(
   projectRoot: string,
   queries: QueryBuilder,
-  traverser: GraphTraverser
+  traverser: GraphTraverser,
+  vectorManager: VectorManager | null
 ): ContextBuilder {
-  return new ContextBuilder(projectRoot, queries, traverser);
+  return new ContextBuilder(projectRoot, queries, traverser, vectorManager);
 }
 
 // Re-export formatter

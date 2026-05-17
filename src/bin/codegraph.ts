@@ -1103,6 +1103,151 @@ program
   });
 
 /**
+ * codegraph visualize [path]
+ */
+program
+  .command('visualize [path]')
+  .description('Open interactive graph visualization in your browser')
+  .option('-p, --port <port>', 'Port to listen on (default: auto)', parseInt)
+  .option('--no-open', 'Do not open browser automatically')
+  .action(async (pathArg: string | undefined, options: { port?: number; open?: boolean }) => {
+    const projectPath = resolveProjectPath(pathArg);
+
+    try {
+      if (!isInitialized(projectPath)) {
+        error(`CodeGraph not initialized in ${projectPath}`);
+        info('Run "codegraph init -i" first');
+        process.exit(1);
+      }
+
+      const { default: CodeGraph } = await loadCodeGraph();
+      const cg = await CodeGraph.open(projectPath);
+      const stats = cg.getStats();
+
+      console.log(chalk.bold('\n  CodeGraph Explorer\n'));
+      info(`Project: ${projectPath}`);
+      info(`Indexed: ${formatNumber(stats.nodeCount)} nodes, ${formatNumber(stats.edgeCount)} edges, ${formatNumber(stats.fileCount)} files\n`);
+
+      const { VisualizerServer } = await import('../visualizer/server');
+      const server = new VisualizerServer(cg);
+      const { url } = await server.start({ port: options.port, openBrowser: options.open !== false });
+
+      success(`Visualizer running at ${chalk.cyan(url)}`);
+      console.log(chalk.dim('  Press Ctrl+C to stop\n'));
+
+      // Open browser
+      if (options.open !== false) {
+        const openCmd = process.platform === 'darwin' ? 'open' :
+                        process.platform === 'win32' ? 'start' : 'xdg-open';
+        spawn(openCmd, [url], { detached: true, stdio: 'ignore' }).unref();
+      }
+
+      // Handle shutdown — force exit on second Ctrl+C
+      let shuttingDown = false;
+      const shutdown = () => {
+        if (shuttingDown) {
+          process.exit(1);
+        }
+        shuttingDown = true;
+        console.log(chalk.dim('\n  Shutting down...'));
+        server.stop().then(() => {
+          cg.close();
+          process.exit(0);
+        }).catch(() => process.exit(1));
+        // Force exit after 2s if graceful shutdown hangs
+        setTimeout(() => process.exit(1), 2000).unref();
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+    } catch (err) {
+      error(`Failed to start visualizer: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
+ * codegraph mark-dirty [path]
+ *
+ * Touches .codegraph/.dirty to signal that files have changed.
+ * Used by Claude Code PostToolUse hooks to batch syncs.
+ * Runs silently and always exits 0.
+ */
+program
+  .command('mark-dirty [path]')
+  .description('Mark project as needing sync (used by Claude Code hooks)')
+  .action(async (pathArg: string | undefined) => {
+    try {
+      const startPath = path.resolve(pathArg || process.cwd());
+      const projectRoot = findNearestCodeGraphRoot(startPath);
+      if (!projectRoot) {
+        // No .codegraph/ found — exit silently
+        process.exit(0);
+      }
+      const dirtyPath = path.join(getCodeGraphDir(projectRoot), '.dirty');
+      fs.writeFileSync(dirtyPath, Date.now().toString(), 'utf-8');
+    } catch {
+      // Never fail — this runs in the background during edits
+    }
+    process.exit(0);
+  });
+
+/**
+ * codegraph sync-if-dirty [path]
+ *
+ * Checks if .codegraph/.dirty exists and, if so, spawns a detached
+ * background process to run `codegraph sync`. The hook process exits
+ * immediately so Claude Code's Stop hook never blocks.
+ *
+ * Removes the marker BEFORE spawning so edits during sync
+ * create a new marker for the next Stop event.
+ * Runs silently and always exits 0.
+ */
+program
+  .command('sync-if-dirty [path]')
+  .description('Sync if project was marked dirty (used by Claude Code hooks)')
+  .action(async (pathArg: string | undefined) => {
+    try {
+      const startPath = path.resolve(pathArg || process.cwd());
+      const projectRoot = findNearestCodeGraphRoot(startPath);
+      if (!projectRoot) {
+        process.exit(0);
+      }
+      const dirtyPath = path.join(getCodeGraphDir(projectRoot!), '.dirty');
+
+      // No marker → nothing to do (sub-ms exit)
+      if (!fs.existsSync(dirtyPath)) {
+        process.exit(0);
+      }
+
+      // Remove marker FIRST so edits during sync create a new one
+      try { fs.unlinkSync(dirtyPath); } catch { /* ignore */ }
+
+      // If not fully initialized (no DB), exit
+      if (!isInitialized(projectRoot!)) {
+        process.exit(0);
+      }
+
+      // Spawn sync as a detached background process
+      // so this hook exits immediately and doesn't block Claude Code.
+      // Uses process.argv[0]/[1] (e.g. node /path/to/codegraph.js) so it
+      // works whether invoked via global install, npx, or directly.
+      const child = spawn(
+        process.argv[0]!,
+        [process.argv[1]!, 'sync', '--quiet', projectRoot!],
+        {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        }
+      );
+      child.unref();
+    } catch {
+      // Never fail — this runs at the end of Claude responses
+    }
+    process.exit(0);
+  });
+
+/**
  * codegraph unlock [path]
  */
 program
