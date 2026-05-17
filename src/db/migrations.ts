@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 /**
  * Migration definition
@@ -63,6 +63,33 @@ const migrations: Migration[] = [
         DROP INDEX IF EXISTS idx_edges_source;
         DROP INDEX IF EXISTS idx_edges_target;
       `);
+    },
+  },
+  {
+    version: 5,
+    description: 'Add semantic vector metadata for remote embeddings',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS vectors (
+          node_id TEXT PRIMARY KEY,
+          embedding BLOB NOT NULL,
+          model TEXT NOT NULL,
+          dimension INTEGER NOT NULL DEFAULT 768,
+          content_hash TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model);
+      `);
+      try {
+        db.exec('ALTER TABLE vectors ADD COLUMN dimension INTEGER NOT NULL DEFAULT 768;');
+      } catch {
+        // Existing database already has the column.
+      }
+      try {
+        db.exec("ALTER TABLE vectors ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';");
+      } catch {
+        // Existing database already has the column.
+      }
     },
   },
 ];

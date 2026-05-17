@@ -2,11 +2,10 @@
  * Vector Embedding Tests
  *
  * Tests for vector embedding and semantic search functionality.
- * Note: Full embedding tests require the model to be downloaded,
- * which can take time on first run.
+ * Network embedding tests mock the Gemini API.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -92,6 +91,43 @@ describe('Vector Embeddings', () => {
         const similarity = TextEmbedder.cosineSimilarity(vec1, vec2);
 
         expect(similarity).toBe(0);
+      });
+    });
+
+    describe('Gemini API', () => {
+      const originalFetch = global.fetch;
+
+      afterEach(() => {
+        global.fetch = originalFetch;
+        vi.restoreAllMocks();
+      });
+
+      it('should call Gemini embedContent once per input text', async () => {
+        const fetchMock = vi.fn(async () => ({
+          ok: true,
+          json: async () => ({ embedding: { values: [0.1, 0.2, 0.3] } }),
+        })) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        const embedder = new TextEmbedder({
+          apiKey: 'test-key',
+          outputDimensionality: 3,
+        });
+        await embedder.initialize();
+
+        const result = await embedder.embedBatch(['node one', 'node two'], 'document');
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(result.embeddings).toHaveLength(2);
+        const firstBody = JSON.parse((fetchMock as any).mock.calls[0][1].body);
+        expect(firstBody.output_dimensionality).toBe(3);
+        expect(firstBody.content.parts).toHaveLength(1);
+        expect(firstBody.content.parts[0].text).toContain('task: code retrieval | document:');
+      });
+
+      it('should require an API key before initialization', async () => {
+        const embedder = new TextEmbedder();
+        await expect(embedder.initialize()).rejects.toThrow(/api key/i);
       });
     });
   });
@@ -286,10 +322,9 @@ export function processData(input: string): string {
       expect(cg.isEmbeddingsInitialized()).toBe(false);
     });
 
-    it('should return embedding stats even before initialization', () => {
+    it('should return null embedding stats when semantic search is disabled', () => {
       const stats = cg.getEmbeddingStats();
-      expect(stats).not.toBeNull();
-      expect(stats!.totalVectors).toBe(0);
+      expect(stats).toBeNull();
     });
 
     it('should throw when calling semanticSearch without initialization', async () => {

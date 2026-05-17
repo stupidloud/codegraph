@@ -6,9 +6,10 @@
 
 import { SqliteDatabase } from '../db/sqlite-adapter';
 import { Node, SearchResult, SearchOptions } from '../types';
-import { TextEmbedder, createEmbedder, EmbedderOptions, EMBEDDING_DIMENSION } from './embedder';
+import { TextEmbedder, createEmbedder, EmbedderOptions } from './embedder';
 import { VectorSearchManager, createVectorSearch } from './search';
 import { QueryBuilder } from '../db/queries';
+import * as crypto from 'crypto';
 
 /**
  * Progress callback for embedding generation
@@ -73,7 +74,7 @@ export class VectorManager {
     options: VectorManagerOptions = {}
   ) {
     this.embedder = createEmbedder(options.embedder);
-    this.searchManager = createVectorSearch(db, EMBEDDING_DIMENSION);
+    this.searchManager = createVectorSearch(db, this.embedder.getDimension());
     this.queries = queries;
     this.nodeKinds = options.nodeKinds || DEFAULT_NODE_KINDS;
     this.batchSize = options.batchSize || 32;
@@ -82,14 +83,14 @@ export class VectorManager {
   /**
    * Initialize the vector manager
    *
-   * Loads the embedding model and initializes vector search.
+   * Validates embedding configuration and initializes vector search.
    */
   async initialize(): Promise<void> {
     if (this.initialized) {
       return;
     }
 
-    // Initialize embedder (downloads model if needed)
+    // Initialize embedder configuration.
     await this.embedder.initialize();
 
     // Initialize vector search (loads sqlite-vss if available)
@@ -123,9 +124,20 @@ export class VectorManager {
       nodesToEmbed.push(...nodes);
     }
 
-    // Filter out nodes that already have embeddings
-    const existingIds = new Set(this.searchManager.getIndexedNodeIds());
-    const newNodes = nodesToEmbed.filter((n) => !existingIds.has(n.id));
+    // Remove vectors for nodes no longer present, then embed nodes whose text,
+    // model, or dimension changed.
+    this.searchManager.deleteStaleVectors();
+    const model = this.embedder.getModelId();
+    const dimension = this.embedder.getDimension();
+    const newNodes = nodesToEmbed.filter((node) => {
+      const text = TextEmbedder.createNodeText(node);
+      return !this.searchManager.hasCurrentVector(
+        node.id,
+        model,
+        dimension,
+        this.hashText(text)
+      );
+    });
 
     if (newNodes.length === 0) {
       return 0;
@@ -133,8 +145,6 @@ export class VectorManager {
 
     // Process in batches
     let processed = 0;
-    const model = this.embedder.getModelId();
-
     for (let i = 0; i < newNodes.length; i += this.batchSize) {
       const batch = newNodes.slice(i, i + this.batchSize);
 
@@ -145,12 +155,12 @@ export class VectorManager {
       const result = await this.embedder.embedBatch(texts, 'document');
 
       // Store embeddings
-      const entries: Array<{ nodeId: string; embedding: Float32Array }> = [];
+      const entries: Array<{ nodeId: string; embedding: Float32Array; contentHash: string }> = [];
       for (let idx = 0; idx < batch.length; idx++) {
         const node = batch[idx];
         const embedding = result.embeddings[idx];
         if (node && embedding) {
-          entries.push({ nodeId: node.id, embedding });
+          entries.push({ nodeId: node.id, embedding, contentHash: this.hashText(texts[idx]!) });
         }
       }
       this.searchManager.storeVectorBatch(entries, model);
@@ -182,7 +192,7 @@ export class VectorManager {
 
     const text = TextEmbedder.createNodeText(node);
     const result = await this.embedder.embed(text);
-    this.searchManager.storeVector(node.id, result.embedding, result.model);
+    this.searchManager.storeVector(node.id, result.embedding, result.model, this.hashText(text));
   }
 
   /**
@@ -337,6 +347,13 @@ export class VectorManager {
   }
 
   /**
+   * Delete vectors for nodes that no longer exist.
+   */
+  deleteStaleVectors(): number {
+    return this.searchManager.deleteStaleVectors();
+  }
+
+  /**
    * Rebuild the VSS index
    */
   rebuildIndex(): void {
@@ -348,6 +365,10 @@ export class VectorManager {
    */
   dispose(): void {
     this.embedder.dispose();
+  }
+
+  private hashText(text: string): string {
+    return crypto.createHash('sha256').update(text).digest('hex');
   }
 }
 

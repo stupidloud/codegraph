@@ -487,6 +487,22 @@ export interface CodeGraphConfig {
     /** Node kind to assign */
     kind: NodeKind;
   }[];
+
+  /** Optional semantic search configuration */
+  semanticSearch?: {
+    /** Enable Gemini-backed semantic embeddings */
+    enabled: boolean;
+    /** Embedding provider */
+    provider: 'gemini';
+    /** Gemini API key. Stored in project config when enabled. */
+    apiKey?: string;
+    /** Gemini embedding model */
+    model?: string;
+    /** Requested embedding dimension */
+    outputDimensionality?: number;
+    /** Number of node embeddings to generate per manager batch */
+    batchSize?: number;
+  };
 }
 
 /**
@@ -693,6 +709,13 @@ export const DEFAULT_CONFIG: CodeGraphConfig = {
   maxFileSize: 1024 * 1024, // 1MB
   extractDocstrings: true,
   trackCallSites: true,
+  semanticSearch: {
+    enabled: false,
+    provider: 'gemini',
+    model: 'gemini-embedding-2',
+    outputDimensionality: 768,
+    batchSize: 32,
+  },
 };
 
 // =============================================================================

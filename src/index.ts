@@ -165,15 +165,33 @@ export class CodeGraph {
     this.resolver = createResolver(projectRoot, queries);
     this.graphManager = new GraphQueryManager(queries);
     this.traverser = new GraphTraverser(queries);
-    // Vector manager — always created, embeddings generated lazily on first use
-    this.vectorManager = createVectorManager(db.getDb(), queries, {});
-    // Context builder (uses vector manager for semantic search)
+    this.vectorManager = this.createConfiguredVectorManager();
     this.contextBuilder = createContextBuilder(
       projectRoot,
       queries,
       this.traverser,
       this.vectorManager
     );
+  }
+
+  private isSemanticSearchEnabled(): boolean {
+    return this.config.semanticSearch?.enabled === true;
+  }
+
+  private createConfiguredVectorManager(): VectorManager | null {
+    if (!this.isSemanticSearchEnabled()) {
+      return null;
+    }
+
+    const semantic = this.config.semanticSearch!;
+    return createVectorManager(this.db.getDb(), this.queries, {
+      embedder: {
+        apiKey: semantic.apiKey,
+        modelId: semantic.model,
+        outputDimensionality: semantic.outputDimensionality,
+      },
+      batchSize: semantic.batchSize,
+    });
   }
 
   // ===========================================================================
@@ -334,7 +352,7 @@ export class CodeGraph {
     this.unwatch();
     // Release file lock if held
     this.fileLock.release();
-    // Dispose vector manager first to release ONNX workers
+    // Dispose vector manager before closing the database.
     if (this.vectorManager) {
       this.vectorManager.dispose();
       this.vectorManager = null;
@@ -366,6 +384,13 @@ export class CodeGraph {
       this.queries
     );
     this.resolver = createResolver(this.projectRoot, this.queries);
+    this.vectorManager = this.createConfiguredVectorManager();
+    this.contextBuilder = createContextBuilder(
+      this.projectRoot,
+      this.queries,
+      this.traverser,
+      this.vectorManager
+    );
   }
 
   /**
@@ -412,6 +437,10 @@ export class CodeGraph {
               total,
             });
           });
+        }
+
+        if (result.success && this.isSemanticSearchEnabled()) {
+          await this.updateSemanticIndex(options.onProgress);
         }
 
         return result;
@@ -495,11 +524,48 @@ export class CodeGraph {
           }
         }
 
+        if (this.isSemanticSearchEnabled()) {
+          await this.updateSemanticIndex(options.onProgress);
+        }
+
         return result;
       } finally {
         this.fileLock.release();
       }
     });
+  }
+
+  private async updateSemanticIndex(onProgress?: (progress: IndexProgress) => void): Promise<void> {
+    await this.initializeEmbeddings();
+    this.vectorManager?.deleteStaleVectors();
+    const total = this.getSemanticEligibleNodeCount();
+    onProgress?.({
+      phase: 'embedding',
+      current: 0,
+      total,
+    });
+    await this.generateEmbeddings((progress) => {
+      onProgress?.({
+        phase: 'embedding',
+        current: progress.current,
+        total: progress.total,
+        currentFile: progress.nodeName,
+      });
+    });
+  }
+
+  private getSemanticEligibleNodeCount(): number {
+    const stats = this.queries.getStats();
+    const kinds: Node['kind'][] = [
+      'function',
+      'method',
+      'class',
+      'interface',
+      'type_alias',
+      'module',
+      'component',
+    ];
+    return kinds.reduce((sum, kind) => sum + (stats.nodesByKind[kind] ?? 0), 0);
   }
 
   /**
@@ -908,16 +974,15 @@ export class CodeGraph {
   /**
    * Initialize the embedding system
    *
-   * This downloads the embedding model on first use and initializes
-   * the vector search system. Must be called before using semantic search.
+   * This validates Gemini configuration and initializes the local vector
+   * search system. Must be called before using semantic search.
    */
   async initializeEmbeddings(): Promise<void> {
     if (!this.vectorManager) {
-      this.vectorManager = createVectorManager(this.db.getDb(), this.queries, {
-        embedder: {
-          showProgress: true,
-        },
-      });
+      this.vectorManager = this.createConfiguredVectorManager();
+      if (!this.vectorManager) {
+        throw new Error('Semantic search is not enabled in CodeGraph config');
+      }
     }
     await this.vectorManager.initialize();
   }

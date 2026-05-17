@@ -60,7 +60,7 @@ src/
 │   └── queries.ts        # High-level graph queries
 ├── vectors/              # Semantic search with embeddings
 │   ├── index.ts          # VectorManager
-│   ├── embedder.ts       # ONNX runtime + model loading
+│   ├── embedder.ts       # Gemini API embedding client
 │   └── search.ts         # Similarity search
 ├── context/              # Context building for AI assistants
 │   ├── index.ts          # ContextBuilder
@@ -89,7 +89,7 @@ src/
 
 - **GraphTraverser** (`src/graph/traversal.ts`): BFS/DFS traversal, call graph construction, impact radius calculation, path finding
 
-- **VectorManager** (`src/vectors/manager.ts`): Manages embeddings using `@xenova/transformers` for ONNX inference. Stores vectors in SQLite BLOB format
+- **VectorManager** (`src/vectors/manager.ts`): Manages embeddings using the Gemini API. Stores vectors in SQLite BLOB format
 
 - **ReferenceResolver** (`src/resolution/index.ts`): Resolves unresolved references after full indexing using framework patterns, import resolution, and name matching
 

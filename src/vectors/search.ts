@@ -130,9 +130,26 @@ export class VectorSearchManager {
         node_id TEXT PRIMARY KEY,
         embedding BLOB NOT NULL,
         model TEXT NOT NULL,
+        dimension INTEGER NOT NULL DEFAULT ${this.embeddingDimension},
+        content_hash TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL
       );
     `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model);
+    `);
+    // Existing databases from the old semantic-search implementation only had
+    // node_id, embedding, model, and created_at.
+    try {
+      this.db.exec(`ALTER TABLE vectors ADD COLUMN dimension INTEGER NOT NULL DEFAULT ${this.embeddingDimension};`);
+    } catch {
+      // Column already exists.
+    }
+    try {
+      this.db.exec(`ALTER TABLE vectors ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';`);
+    } catch {
+      // Column already exists.
+    }
   }
 
   /**
@@ -149,7 +166,7 @@ export class VectorSearchManager {
    * @param embedding - Vector embedding
    * @param model - Model used to generate embedding
    */
-  storeVector(nodeId: string, embedding: Float32Array, model: string): void {
+  storeVector(nodeId: string, embedding: Float32Array, model: string, contentHash: string = ''): void {
     const now = Date.now();
 
     // Store in the vectors table (always, for persistence)
@@ -157,11 +174,11 @@ export class VectorSearchManager {
     this.db
       .prepare(
         `
-        INSERT OR REPLACE INTO vectors (node_id, embedding, model, created_at)
-        VALUES (?, ?, ?, ?)
+        INSERT OR REPLACE INTO vectors (node_id, embedding, model, dimension, content_hash, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
       `
       )
-      .run(nodeId, blob, model, now);
+      .run(nodeId, blob, model, embedding.length, contentHash, now);
 
     // Also store in VSS table if enabled
     if (this.vssEnabled) {
@@ -219,7 +236,7 @@ export class VectorSearchManager {
    * @param model - Model used to generate embeddings
    */
   storeVectorBatch(
-    entries: Array<{ nodeId: string; embedding: Float32Array }>,
+    entries: Array<{ nodeId: string; embedding: Float32Array; contentHash?: string }>,
     model: string
   ): void {
     const now = Date.now();
@@ -231,11 +248,11 @@ export class VectorSearchManager {
         this.db
           .prepare(
             `
-            INSERT OR REPLACE INTO vectors (node_id, embedding, model, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT OR REPLACE INTO vectors (node_id, embedding, model, dimension, content_hash, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
           `
           )
-          .run(entry.nodeId, blob, model, now);
+          .run(entry.nodeId, blob, model, entry.embedding.length, entry.contentHash ?? '', now);
 
         if (this.vssEnabled) {
           this.storeInVss(entry.nodeId, entry.embedding);
@@ -409,6 +426,20 @@ export class VectorSearchManager {
   }
 
   /**
+   * Check if a node has a vector matching the current embedded text.
+   */
+  hasCurrentVector(nodeId: string, model: string, dimension: number, contentHash: string): boolean {
+    const result = this.db
+      .prepare(`
+        SELECT 1 FROM vectors
+        WHERE node_id = ? AND model = ? AND dimension = ? AND content_hash = ?
+        LIMIT 1
+      `)
+      .get(nodeId, model, dimension, contentHash);
+    return !!result;
+  }
+
+  /**
    * Get all node IDs that have vectors
    */
   getIndexedNodeIds(): string[] {
@@ -416,6 +447,26 @@ export class VectorSearchManager {
       .prepare('SELECT node_id FROM vectors')
       .all() as Array<{ node_id: string }>;
     return rows.map((r) => r.node_id);
+  }
+
+  /**
+   * Delete vectors whose node no longer exists.
+   */
+  deleteStaleVectors(): number {
+    const staleIds = this.db
+      .prepare(`
+        SELECT v.node_id
+        FROM vectors v
+        LEFT JOIN nodes n ON n.id = v.node_id
+        WHERE n.id IS NULL
+      `)
+      .all() as Array<{ node_id: string }>;
+
+    for (const row of staleIds) {
+      this.deleteVector(row.node_id);
+    }
+
+    return staleIds.length;
   }
 
   /**

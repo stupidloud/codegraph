@@ -1,49 +1,31 @@
 /**
  * Text Embedder
  *
- * Generates vector embeddings using the nomic-embed-text model via Transformers.js.
- * Uses ONNX runtime under the hood for fast local inference.
+ * Generates vector embeddings through the Gemini API. Vector storage and
+ * similarity search remain local.
  */
-
-import * as path from 'path';
-import * as fs from 'fs';
-import { homedir } from 'os';
-
-// Global model cache directory - uses codegraph's models directory for shared embedding models
-const GLOBAL_MODELS_DIR = path.join(homedir(), '.codegraph', 'models');
-
-// Dynamic import for @xenova/transformers (ESM-only package)
-// We use dynamic import to support CommonJS builds
-let transformersModule: typeof import('@xenova/transformers') | null = null;
-
-async function getTransformers() {
-  if (!transformersModule) {
-    transformersModule = await import('@xenova/transformers');
-  }
-  return transformersModule;
-}
-
-// Type for the feature extraction pipeline
-type FeatureExtractionPipeline = any;
 
 /**
- * Default model for embeddings
- * nomic-embed-text-v1.5 produces 384-dimensional embeddings
+ * Default Gemini embedding model.
  */
-export const DEFAULT_MODEL = 'nomic-ai/nomic-embed-text-v1.5';
-export const EMBEDDING_DIMENSION = 768; // nomic-embed-text-v1.5 uses 768 dimensions
+export const DEFAULT_MODEL = 'gemini-embedding-2';
+export const EMBEDDING_DIMENSION = 768;
+const GEMINI_EMBEDDING_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /**
  * Options for the embedder
  */
 export interface EmbedderOptions {
-  /** Model ID to use (default: nomic-ai/nomic-embed-text-v1.5) */
+  /** Gemini API key */
+  apiKey?: string;
+
+  /** Model ID to use (default: gemini-embedding-2) */
   modelId?: string;
 
-  /** Directory to cache the model (default: ~/.codegraph/models) */
-  cacheDir?: string;
+  /** Embedding dimension to request from Gemini */
+  outputDimensionality?: number;
 
-  /** Whether to show progress during model download */
+  /** Whether to show progress during embedding generation */
   showProgress?: boolean;
 }
 
@@ -78,70 +60,42 @@ export interface BatchEmbeddingResult {
   durationMs: number;
 }
 
+type GeminiEmbeddingResponse = {
+  embedding?: { values?: number[] };
+  embeddings?: Array<{ values?: number[] }>;
+};
+
 /**
- * Text Embedder using Transformers.js
+ * Text Embedder using Gemini.
  *
- * Uses the nomic-embed-text-v1.5 model to generate embeddings for code
- * and natural language queries.
+ * Gemini's embedContent endpoint returns one embedding for the provided content,
+ * so batch generation intentionally calls it once per node text. Do not combine
+ * multiple nodes into one content.parts array because that produces a single
+ * aggregate embedding instead of node-level vectors.
  */
 export class TextEmbedder {
+  private apiKey?: string;
   private modelId: string;
-  private cacheDir: string;
-  private pipeline: FeatureExtractionPipeline | null = null;
+  private dimension: number;
   private initialized = false;
-  private showProgress: boolean;
 
   constructor(options: EmbedderOptions = {}) {
+    this.apiKey = options.apiKey;
     this.modelId = options.modelId || DEFAULT_MODEL;
-    this.cacheDir = options.cacheDir || GLOBAL_MODELS_DIR;
-    this.showProgress = options.showProgress ?? false;
+    this.dimension = options.outputDimensionality || EMBEDDING_DIMENSION;
   }
 
   /**
-   * Initialize the embedder by loading the model
-   *
-   * This will download the model on first use if not already cached.
+   * Initialize the embedder by validating configuration.
    */
   async initialize(): Promise<void> {
     if (this.initialized) {
       return;
     }
 
-    // Load transformers.js dynamically (ESM-only package)
-    const { pipeline, env } = await getTransformers();
-
-    // Configure transformers.js to use local cache
-    env.cacheDir = this.cacheDir;
-
-    // Ensure cache directory exists
-    if (!fs.existsSync(this.cacheDir)) {
-      fs.mkdirSync(this.cacheDir, { recursive: true });
+    if (!this.apiKey) {
+      throw new Error('Gemini API key is required for semantic search');
     }
-
-    // Disable remote model checking if model is already cached
-    // This speeds up initialization significantly
-    const modelCacheExists = fs.existsSync(
-      path.join(this.cacheDir, this.modelId.replace('/', '--'))
-    );
-    if (modelCacheExists) {
-      env.allowRemoteModels = false;
-    }
-
-    // Load the pipeline with quantized model to reduce WASM memory pressure.
-    // Quantized (int8/uint8) is ~4x smaller than FP32 with minimal quality loss.
-    this.pipeline = await pipeline('feature-extraction', this.modelId, {
-      quantized: true,
-      progress_callback: this.showProgress
-        ? (progress: { status: string; file?: string; progress?: number }) => {
-            if (progress.status === 'progress' && progress.file && progress.progress) {
-              const pct = Math.round(progress.progress);
-              process.stdout.write(`\rDownloading ${progress.file}: ${pct}%\x1b[K`);
-            } else if (progress.status === 'done') {
-              process.stdout.write('\n');
-            }
-          }
-        : undefined,
-    });
 
     this.initialized = true;
   }
@@ -164,170 +118,114 @@ export class TextEmbedder {
    * Get the embedding dimension
    */
   getDimension(): number {
-    return EMBEDDING_DIMENSION;
+    return this.dimension;
   }
 
   /**
    * Generate embedding for a single text
-   *
-   * @param text - Text to embed
-   * @returns Embedding result
    */
   async embed(text: string): Promise<EmbeddingResult> {
-    if (!this.initialized || !this.pipeline) {
-      throw new Error('Embedder not initialized. Call initialize() first.');
-    }
-
-    // Prepare text for nomic-embed-text (it expects specific prefixes)
-    const preparedText = this.prepareText(text, 'document');
-
-    // Generate embedding
-    const output = await this.pipeline(preparedText, {
-      pooling: 'mean',
-      normalize: true,
-    });
-
-    // Extract the embedding array - handle various data formats
-    const data = output.data as unknown;
-    const embedding = this.toFloat32Array(data);
-
-    return {
-      embedding,
-      dimension: embedding.length,
-      model: this.modelId,
-    };
+    return this.embedPrepared(this.prepareText(text, 'document'));
   }
 
   /**
-   * Generate embedding for a query (uses different prefix)
-   *
-   * @param query - Query text to embed
-   * @returns Embedding result
+   * Generate embedding for a query.
    */
   async embedQuery(query: string): Promise<EmbeddingResult> {
-    if (!this.initialized || !this.pipeline) {
-      throw new Error('Embedder not initialized. Call initialize() first.');
-    }
-
-    // Prepare text for nomic-embed-text query
-    const preparedText = this.prepareText(query, 'search_query');
-
-    // Generate embedding
-    const output = await this.pipeline(preparedText, {
-      pooling: 'mean',
-      normalize: true,
-    });
-
-    // Extract the embedding array - handle various data formats
-    const data = output.data as unknown;
-    const embedding = this.toFloat32Array(data);
-
-    return {
-      embedding,
-      dimension: embedding.length,
-      model: this.modelId,
-    };
+    return this.embedPrepared(this.prepareText(query, 'search_query'));
   }
 
   /**
-   * Generate embeddings for multiple texts in a batch
-   *
-   * @param texts - Array of texts to embed
-   * @param type - Type of text (document or search_query)
-   * @returns Batch embedding result
+   * Generate embeddings for multiple texts in node order.
    */
   async embedBatch(
     texts: string[],
     type: 'document' | 'search_query' = 'document'
   ): Promise<BatchEmbeddingResult> {
-    if (!this.initialized || !this.pipeline) {
+    if (!this.initialized) {
       throw new Error('Embedder not initialized. Call initialize() first.');
     }
 
     if (texts.length === 0) {
       return {
         embeddings: [],
-        dimension: EMBEDDING_DIMENSION,
+        dimension: this.dimension,
         model: this.modelId,
         durationMs: 0,
       };
     }
 
     const startTime = Date.now();
-
-    // Prepare all texts
-    const preparedTexts = texts.map((t) => this.prepareText(t, type));
-
-    // Generate embeddings
-    const outputs = await this.pipeline(preparedTexts, {
-      pooling: 'mean',
-      normalize: true,
-    });
-
-    // Extract embeddings
     const embeddings: Float32Array[] = [];
-    const dims = outputs.dims as number[];
-    const dimension = dims[1] ?? EMBEDDING_DIMENSION;
-    const data = outputs.data as unknown;
-    const flatData = this.toFloat32Array(data);
 
-    for (let i = 0; i < texts.length; i++) {
-      const start = i * dimension;
-      const end = start + dimension;
-      embeddings.push(flatData.slice(start, end));
+    for (const text of texts) {
+      const result = await this.embedPrepared(this.prepareText(text, type));
+      embeddings.push(result.embedding);
     }
 
     return {
       embeddings,
-      dimension,
+      dimension: embeddings[0]?.length ?? this.dimension,
       model: this.modelId,
       durationMs: Date.now() - startTime,
     };
   }
 
-  /**
-   * Convert various array formats to Float32Array
-   */
-  private toFloat32Array(data: unknown): Float32Array {
-    if (data instanceof Float32Array) {
-      return data;
+  private async embedPrepared(text: string): Promise<EmbeddingResult> {
+    if (!this.initialized) {
+      throw new Error('Embedder not initialized. Call initialize() first.');
     }
-    if (Array.isArray(data)) {
-      return new Float32Array(data);
+
+    const url = `${GEMINI_EMBEDDING_ENDPOINT}/${encodeURIComponent(this.modelId)}:embedContent`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': this.apiKey!,
+      },
+      body: JSON.stringify({
+        model: `models/${this.modelId}`,
+        content: {
+          parts: [{ text }],
+        },
+        output_dimensionality: this.dimension,
+      }),
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`Gemini embedding request failed (${response.status}): ${body || response.statusText}`);
     }
-    if (data && typeof data === 'object' && 'length' in data) {
-      // Handle TypedArray-like objects
-      const arr = data as ArrayLike<number>;
-      return Float32Array.from(Array.from(arr));
+
+    const json = await response.json() as GeminiEmbeddingResponse;
+    const values = json.embedding?.values ?? json.embeddings?.[0]?.values;
+    if (!values || values.length === 0) {
+      throw new Error('Gemini embedding response did not include values');
     }
-    throw new Error('Unsupported data format for embedding');
+
+    const embedding = new Float32Array(values);
+    return {
+      embedding,
+      dimension: embedding.length,
+      model: this.modelId,
+    };
   }
 
   /**
-   * Prepare text for the nomic-embed-text model
-   *
-   * The model expects specific prefixes for different tasks:
-   * - "search_document: " for documents to be searched
-   * - "search_query: " for search queries
+   * Prepare text for retrieval-oriented embedding.
    */
   private prepareText(text: string, type: 'document' | 'search_query'): string {
-    // Truncate very long texts (model has a max token limit)
-    const maxLength = 8192; // nomic-embed-text-v1.5 supports 8192 tokens
+    const maxLength = 8192;
     const truncatedText = text.length > maxLength ? text.slice(0, maxLength) : text;
 
-    // Add appropriate prefix
     if (type === 'search_query') {
-      return `search_query: ${truncatedText}`;
-    } else {
-      return `search_document: ${truncatedText}`;
+      return `task: code retrieval | query: ${truncatedText}`;
     }
+    return `task: code retrieval | document: ${truncatedText}`;
   }
 
   /**
-   * Create text representation of a code node for embedding
-   *
-   * Combines name, signature, docstring, and code snippet into
-   * a searchable text representation.
+   * Create text representation of a code node for embedding.
    */
   static createNodeText(node: {
     name: string;
@@ -339,23 +237,18 @@ export class TextEmbedder {
   }): string {
     const parts: string[] = [];
 
-    // Add kind and name
     parts.push(`${node.kind}: ${node.name}`);
 
-    // Add qualified name if different from name
     if (node.qualifiedName && node.qualifiedName !== node.name) {
       parts.push(`path: ${node.qualifiedName}`);
     }
 
-    // Add file path
     parts.push(`file: ${node.filePath}`);
 
-    // Add signature if present
     if (node.signature) {
       parts.push(`signature: ${node.signature}`);
     }
 
-    // Add docstring if present
     if (node.docstring) {
       parts.push(`documentation: ${node.docstring}`);
     }
@@ -397,7 +290,6 @@ export class TextEmbedder {
    * Release resources
    */
   dispose(): void {
-    this.pipeline = null;
     this.initialized = false;
   }
 }

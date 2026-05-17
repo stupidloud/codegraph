@@ -260,8 +260,8 @@ ${symbolIndex}`;
         };
 
         try {
-          // Step 1: Initialize embedding model (downloads on first use)
-          send('status', { phase: 'model', message: 'Loading embedding model (first time may download ~30MB)...' });
+          // Step 1: Initialize embedding provider
+          send('status', { phase: 'model', message: 'Initializing embedding provider...' });
           await this.cg.initializeEmbeddings();
           send('status', { phase: 'model', message: 'Embedding model ready' });
 

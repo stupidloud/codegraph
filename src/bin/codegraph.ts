@@ -21,7 +21,8 @@
 import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';
-import { getCodeGraphDir, isInitialized } from '../directory';
+import { spawn } from 'child_process';
+import { getCodeGraphDir, findNearestCodeGraphRoot, isInitialized } from '../directory';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 
 import { buildNode25BlockBanner } from './node-version-check';
