@@ -205,6 +205,68 @@ describe('Vector Embeddings', () => {
         }
       });
 
+      it('should retry retryable Gemini errors with exponential backoff', async () => {
+        vi.useFakeTimers();
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValueOnce({
+            ok: false,
+            status: 429,
+            statusText: 'Too Many Requests',
+            headers: new Headers(),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              embeddings: [{ values: [0.1, 0.2, 0.3] }],
+            }),
+          }) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        try {
+          const embedder = new TextEmbedder({
+            apiKey: 'test-key',
+            outputDimensionality: 3,
+          });
+          await embedder.initialize();
+
+          const resultPromise = embedder.embedBatch(['node one'], 'document');
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(999);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(1);
+
+          const result = await resultPromise;
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+          expect(result.embeddings[0]![0]).toBeCloseTo(0.1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('should not retry permanent Gemini errors', async () => {
+        const fetchMock = vi.fn(async () => ({
+          ok: false,
+          status: 400,
+          statusText: 'Bad Request',
+          text: async () => 'invalid request',
+        })) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        const embedder = new TextEmbedder({
+          apiKey: 'test-key',
+          outputDimensionality: 3,
+        });
+        await embedder.initialize();
+
+        await expect(embedder.embedBatch(['node one'], 'document')).rejects.toThrow(
+          /Gemini embedding request failed \(400\): invalid request/
+        );
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
       it('should require an API key before initialization', async () => {
         const embedder = new TextEmbedder();
         await expect(embedder.initialize()).rejects.toThrow(/api key/i);

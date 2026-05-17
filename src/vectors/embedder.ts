@@ -13,6 +13,11 @@ export const EMBEDDING_DIMENSION = 768;
 const GEMINI_EMBEDDING_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MAX_REQUESTS_PER_MINUTE = 100;
 const RATE_LIMIT_WINDOW_MS = 60_000;
+const MAX_RETRY_ATTEMPTS = 3;
+const INITIAL_RETRY_DELAY_MS = 1_000;
+const RETRY_DELAY_MULTIPLIER = 2;
+const MAX_RETRY_DELAY_MS = 64_000;
+const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 
 /**
  * Options for the embedder
@@ -201,7 +206,7 @@ export class TextEmbedder {
     const model = `models/${this.modelId}`;
     const taskType = type === 'search_query' ? 'CODE_RETRIEVAL_QUERY' : 'RETRIEVAL_DOCUMENT';
     await this.throttleRequests(texts.length);
-    const response = await fetch(url, {
+    const response = await this.fetchWithRetry(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -242,6 +247,68 @@ export class TextEmbedder {
     }
 
     return embeddings;
+  }
+
+  private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+    let lastNetworkError: unknown;
+
+    for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+      try {
+        const response = await fetch(url, init);
+        if (!this.isRetryableStatus(response.status) || attempt === MAX_RETRY_ATTEMPTS) {
+          return response;
+        }
+
+        await this.sleep(this.getRetryDelayMs(attempt, response));
+      } catch (error) {
+        lastNetworkError = error;
+        if (attempt === MAX_RETRY_ATTEMPTS) {
+          break;
+        }
+
+        await this.sleep(this.getRetryDelayMs(attempt));
+      }
+    }
+
+    throw lastNetworkError instanceof Error
+      ? lastNetworkError
+      : new Error(`Gemini embedding request failed: ${String(lastNetworkError)}`);
+  }
+
+  private isRetryableStatus(status: number): boolean {
+    return RETRYABLE_STATUS_CODES.has(status);
+  }
+
+  private getRetryDelayMs(attempt: number, response?: Response): number {
+    const retryAfterMs = this.getRetryAfterMs(response);
+    const exponentialDelay = Math.min(
+      INITIAL_RETRY_DELAY_MS * Math.pow(RETRY_DELAY_MULTIPLIER, attempt),
+      MAX_RETRY_DELAY_MS
+    );
+    return Math.max(retryAfterMs ?? 0, exponentialDelay);
+  }
+
+  private getRetryAfterMs(response?: Response): number | undefined {
+    const retryAfter = response?.headers?.get?.('retry-after');
+    if (!retryAfter) {
+      return undefined;
+    }
+
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return seconds * 1000;
+    }
+
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isNaN(retryAt)) {
+      return undefined;
+    }
+
+    return Math.max(0, retryAt - Date.now());
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private async throttleRequests(cost: number): Promise<void> {
