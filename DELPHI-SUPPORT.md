@@ -152,6 +152,6 @@ This configures the MCP server, tool permissions, auto-sync hooks, and CLAUDE.md
 ### 6. Clean up
 
 ```bash
-npm unlink -g @colbymchenry/codegraph       # Remove global link
+npm unlink -g @stupidloud/codegraph       # Remove global link
 rm -rf /path/to/delphi-project/.codegraph   # Remove project index
 ```

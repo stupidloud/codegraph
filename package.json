@@ -1,5 +1,5 @@
 {
-  "name": "@colbymchenry/codegraph",
+  "name": "@stupidloud/codegraph",
   "version": "0.7.6",
   "description": "Supercharge Claude Code with semantic code intelligence. 94% fewer tool calls • 77% faster exploration • 100% local.",
   "main": "dist/index.js",
