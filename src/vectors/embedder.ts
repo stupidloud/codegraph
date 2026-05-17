@@ -12,7 +12,7 @@ export const DEFAULT_MODEL = 'gemini-embedding-2';
 export const EMBEDDING_DIMENSION = 768;
 const GEMINI_EMBEDDING_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MAX_REQUESTS_PER_MINUTE = 100;
-const MIN_REQUEST_INTERVAL_MS = Math.ceil(60_000 / MAX_REQUESTS_PER_MINUTE);
+const RATE_LIMIT_WINDOW_MS = 60_000;
 
 /**
  * Options for the embedder
@@ -78,7 +78,8 @@ export class TextEmbedder {
   private modelId: string;
   private dimension: number;
   private initialized = false;
-  private lastRequestAt = 0;
+  private requestTimestamps: Array<{ timestamp: number; cost: number }> = [];
+  private rateLimitQueue: Promise<void> = Promise.resolve();
 
   constructor(options: EmbedderOptions = {}) {
     this.apiKey = options.apiKey;
@@ -199,7 +200,7 @@ export class TextEmbedder {
     const url = `${GEMINI_EMBEDDING_ENDPOINT}/${encodeURIComponent(this.modelId)}:batchEmbedContents`;
     const model = `models/${this.modelId}`;
     const taskType = type === 'search_query' ? 'CODE_RETRIEVAL_QUERY' : 'RETRIEVAL_DOCUMENT';
-    await this.throttleRequests();
+    await this.throttleRequests(texts.length);
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -243,13 +244,35 @@ export class TextEmbedder {
     return embeddings;
   }
 
-  private async throttleRequests(): Promise<void> {
-    const now = Date.now();
-    const elapsed = now - this.lastRequestAt;
-    if (this.lastRequestAt > 0 && elapsed < MIN_REQUEST_INTERVAL_MS) {
-      await new Promise((resolve) => setTimeout(resolve, MIN_REQUEST_INTERVAL_MS - elapsed));
+  private async throttleRequests(cost: number): Promise<void> {
+    const reservation = this.rateLimitQueue.then(() => this.reserveRequestSlots(cost));
+    this.rateLimitQueue = reservation.catch(() => undefined);
+    await reservation;
+  }
+
+  private async reserveRequestSlots(cost: number): Promise<void> {
+    if (cost > MAX_REQUESTS_PER_MINUTE) {
+      throw new Error(
+        `Gemini embedding batch size ${cost} exceeds the ${MAX_REQUESTS_PER_MINUTE} requests-per-minute limit`
+      );
     }
-    this.lastRequestAt = Date.now();
+
+    while (true) {
+      const now = Date.now();
+      this.requestTimestamps = this.requestTimestamps.filter(
+        ({ timestamp }) => now - timestamp < RATE_LIMIT_WINDOW_MS
+      );
+
+      const usedSlots = this.requestTimestamps.reduce((sum, entry) => sum + entry.cost, 0);
+      if (usedSlots + cost <= MAX_REQUESTS_PER_MINUTE) {
+        this.requestTimestamps.push({ timestamp: now, cost });
+        return;
+      }
+
+      const oldestRequestAt = this.requestTimestamps[0]!.timestamp;
+      const waitMs = Math.max(1, RATE_LIMIT_WINDOW_MS - (now - oldestRequestAt));
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
   }
 
   /**

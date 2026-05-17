@@ -8,6 +8,16 @@
 import { SqliteDatabase } from '../db/sqlite-adapter';
 import { Node } from '../types';
 import { TextEmbedder, EMBEDDING_DIMENSION } from './embedder';
+import * as path from 'path';
+
+type SqliteVssModule = {
+  getVectorLoadablePath?: () => string;
+  getVssLoadablePath?: () => string;
+  default?: {
+    getVectorLoadablePath?: () => string;
+    getVssLoadablePath?: () => string;
+  };
+};
 
 /**
  * Options for vector search
@@ -49,7 +59,7 @@ export class VectorSearchManager {
       // Try to load sqlite-vss extension
       await this.loadVssExtension();
       this.vssEnabled = true;
-      console.log('sqlite-vss extension loaded successfully');
+      console.error('sqlite-vss extension loaded successfully');
 
       // Create the VSS virtual table
       this.createVssTable();
@@ -72,20 +82,51 @@ export class VectorSearchManager {
   private async loadVssExtension(): Promise<void> {
     try {
       // The sqlite-vss npm package provides functions to load extensions
-      const vss = await import('sqlite-vss');
+      const vss = await import('sqlite-vss') as SqliteVssModule;
+      const sqliteDb = this.db as any;
+      const getVectorLoadablePath = vss.getVectorLoadablePath ?? vss.default?.getVectorLoadablePath;
+      const getVssLoadablePath = vss.getVssLoadablePath ?? vss.default?.getVssLoadablePath;
 
-      // Use the load function which loads both vector0 and vss0
-      // VSS extension expects the raw better-sqlite3 Database instance
-      if (typeof vss.load === 'function') {
-        vss.load(this.db as any);
-      } else if (typeof vss.default?.load === 'function') {
-        vss.default.load(this.db as any);
-      } else {
-        throw new Error('sqlite-vss load function not found');
+      if (typeof sqliteDb.loadExtension !== 'function') {
+        throw new Error('SQLite connection does not support loadExtension');
       }
+
+      if (typeof getVectorLoadablePath !== 'function' || typeof getVssLoadablePath !== 'function') {
+        throw new Error('sqlite-vss loadable path functions not found');
+      }
+
+      this.loadExtensionWithFallback(sqliteDb, getVectorLoadablePath());
+      this.loadExtensionWithFallback(sqliteDb, getVssLoadablePath());
     } catch (error) {
       throw new Error(`Failed to load sqlite-vss: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  private loadExtensionWithFallback(sqliteDb: { loadExtension(file: string): void }, loadablePath: string): void {
+    const withoutPlatformSuffix = this.stripPlatformExtensionSuffix(loadablePath);
+    const candidates = withoutPlatformSuffix === loadablePath
+      ? [loadablePath]
+      : [withoutPlatformSuffix, loadablePath];
+    const errors: string[] = [];
+
+    for (const candidate of candidates) {
+      try {
+        sqliteDb.loadExtension(candidate);
+        return;
+      } catch (error) {
+        errors.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    throw new Error(errors.join('; '));
+  }
+
+  private stripPlatformExtensionSuffix(loadablePath: string): string {
+    const ext = path.extname(loadablePath);
+    if (ext === '.so' || ext === '.dylib' || ext === '.dll') {
+      return loadablePath.slice(0, -ext.length);
+    }
+    return loadablePath;
   }
 
   /**

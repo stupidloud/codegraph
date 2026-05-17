@@ -140,14 +140,15 @@ describe('Vector Embeddings', () => {
       });
 
       it('should use CODE_RETRIEVAL_QUERY for query embeddings', async () => {
-        const fetchMock = vi.fn(async () => ({
-          ok: true,
-          json: async () => ({
-            embeddings: [
-              { values: [0.1, 0.2, 0.3] },
-            ],
-          }),
-        })) as unknown as typeof fetch;
+        const fetchMock = vi.fn(async (_url, init) => {
+          const body = JSON.parse((init as RequestInit).body as string);
+          return {
+            ok: true,
+            json: async () => ({
+              embeddings: body.requests.map(() => ({ values: [0.1, 0.2, 0.3] })),
+            }),
+          };
+        }) as unknown as typeof fetch;
         global.fetch = fetchMock;
 
         const embedder = new TextEmbedder({
@@ -163,16 +164,17 @@ describe('Vector Embeddings', () => {
         expect(body.requests[0].taskType).toBe('CODE_RETRIEVAL_QUERY');
       });
 
-      it('should throttle consecutive Gemini requests to 100 RPM', async () => {
+      it('should throttle Gemini requests with a weighted sliding 100 RPM window', async () => {
         vi.useFakeTimers();
-        const fetchMock = vi.fn(async () => ({
-          ok: true,
-          json: async () => ({
-            embeddings: [
-              { values: [0.1, 0.2, 0.3] },
-            ],
-          }),
-        })) as unknown as typeof fetch;
+        const fetchMock = vi.fn(async (_url, init) => {
+          const body = JSON.parse((init as RequestInit).body as string);
+          return {
+            ok: true,
+            json: async () => ({
+              embeddings: body.requests.map(() => ({ values: [0.1, 0.2, 0.3] })),
+            }),
+          };
+        }) as unknown as typeof fetch;
         global.fetch = fetchMock;
 
         try {
@@ -183,15 +185,20 @@ describe('Vector Embeddings', () => {
           });
           await embedder.initialize();
 
-          await embedder.embedBatch(['first'], 'document');
-          const second = embedder.embedBatch(['second'], 'document');
+          const batch = Array.from({ length: 32 }, (_, i) => `node ${i}`);
+          await embedder.embedBatch(batch, 'document');
+          await embedder.embedBatch(batch, 'document');
+          await embedder.embedBatch(batch, 'document');
 
-          expect(fetchMock).toHaveBeenCalledTimes(1);
-          await vi.advanceTimersByTimeAsync(599);
-          expect(fetchMock).toHaveBeenCalledTimes(1);
+          const fourthBatch = embedder.embedBatch(batch, 'document');
+          await Promise.resolve();
+
+          expect(fetchMock).toHaveBeenCalledTimes(3);
+          await vi.advanceTimersByTimeAsync(59_999);
+          expect(fetchMock).toHaveBeenCalledTimes(3);
           await vi.advanceTimersByTimeAsync(1);
-          await second;
-          expect(fetchMock).toHaveBeenCalledTimes(2);
+          await fourthBatch;
+          expect(fetchMock).toHaveBeenCalledTimes(4);
         } finally {
           vi.useRealTimers();
         }

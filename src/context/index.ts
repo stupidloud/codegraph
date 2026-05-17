@@ -123,7 +123,9 @@ function extractSymbolsFromQuery(query: string): string[] {
     'interface', 'interfaces', 'class', 'classes', 'method', 'methods',
     'trigger', 'triggers', 'affected', 'affect', 'affects',
     'else', 'code', 'failing', 'failed', 'silently', 'decide', 'decides',
+    'connect', 'connection', 'connections',
     'return', 'returns', 'returned', 'take', 'takes', 'taken',
+    'send', 'sends', 'receive', 'receives', 'process', 'processes',
     'check', 'checks', 'checked', 'create', 'creates', 'created',
     'read', 'reads', 'write', 'writes', 'written',
     'start', 'starts', 'stop', 'stops', 'run', 'runs', 'running',
@@ -455,41 +457,30 @@ export class ContextBuilder {
       logDebug('Text search failed', { query, error: String(error) });
     }
 
-    // Step 4: Merge results, taking the max score when duplicates appear
-    // across search channels. Exact matches may have lower scores than FTS
-    // results for the same node — use the best score from any channel.
-    const resultById = new Map<string, SearchResult>();
+    // Step 5: Merge results, prioritizing exact matches, then text (path-boosted), then semantic
+    const seenIds = new Set<string>();
     let searchResults: SearchResult[] = [];
 
-    // Add exact matches first
+    // Add exact matches first (highest priority)
     for (const result of exactMatches) {
-      const existing = resultById.get(result.node.id);
-      if (existing) {
-        existing.score = Math.max(existing.score, result.score);
-      } else {
-        resultById.set(result.node.id, result);
+      if (!seenIds.has(result.node.id)) {
+        seenIds.add(result.node.id);
         searchResults.push(result);
       }
     }
 
-    // Add text search results, upgrading scores for duplicates
+    // Add text search results (includes path relevance scoring from searchNodes)
     for (const result of textResults) {
-      const existing = resultById.get(result.node.id);
-      if (existing) {
-        existing.score = Math.max(existing.score, result.score);
-      } else {
-        resultById.set(result.node.id, result);
+      if (!seenIds.has(result.node.id)) {
+        seenIds.add(result.node.id);
         searchResults.push(result);
       }
     }
 
     // Add semantic results
     for (const result of semanticResults) {
-      const existing = resultById.get(result.node.id);
-      if (existing) {
-        existing.score = Math.max(existing.score, result.score);
-      } else {
-        resultById.set(result.node.id, result);
+      if (!seenIds.has(result.node.id)) {
+        seenIds.add(result.node.id);
         searchResults.push(result);
       }
     }
@@ -535,12 +526,6 @@ export class ContextBuilder {
         termGroups.push(group);
       }
 
-      // Build a set of exact-match node IDs so we can exempt them from dampening.
-      // When the query is "LiveEditMode DevServerPreview", these are specific
-      // symbols the user asked for — dampening them because they only match 1
-      // term group is counter-productive.
-      const exactMatchIds = new Set(exactMatches.map(r => r.node.id));
-
       for (const result of searchResults) {
         // Check term matches in name (substring) and path DIRECTORIES (exact).
         // Directory segments must match exactly — "search" matches directory
@@ -560,11 +545,10 @@ export class ContextBuilder {
         if (matchCount >= 2) {
           // Multiplicative boost — 2 terms → 2x, 3 terms → 2.5x
           result.score *= 1 + matchCount * 0.5;
-        } else if (!exactMatchIds.has(result.node.id)) {
-          // Mild dampen for single-term matches — they might be generic
-          // but could also be the right result (e.g., "Protocol" class for an IPC query).
-          // Exempt exact name matches: they are specific symbols the user queried for.
-          result.score *= 0.6;
+        } else {
+          // Dampen single-term matches — they matched a generic word
+          // (e.g., "Execution" or "Shard" alone) not the compound concept
+          result.score *= 0.3;
         }
       }
       searchResults.sort((a, b) => b.score - a.score);
@@ -606,9 +590,7 @@ export class ContextBuilder {
           const name = r.node.name;
           const idx = name.indexOf(titleCased);
           if (idx <= 0) continue;
-          // Accept CamelCase boundary (lowercase before match) OR
-          // acronym boundary (uppercase before match, e.g., RPCProtocol)
-          if (!/[a-zA-Z]/.test(name.charAt(idx - 1))) continue;
+          if (!/[a-z]/.test(name.charAt(idx - 1))) continue;
           if (searchIdSet.has(r.node.id)) continue;
           if (isTestFile(r.node.filePath) && !isTestQuery) continue;
 
@@ -636,20 +618,14 @@ export class ContextBuilder {
         }
       }
 
-      // Append CamelCase matches with multi-term boost.
-      // These are structurally important (class names containing query terms at
-      // CamelCase boundaries) but score much lower than FTS results. Scale their
-      // scores up so multi-term CamelCase matches can compete with FTS results.
+      // Append CamelCase matches with multi-term boost (guaranteed slots)
       const camelResults: SearchResult[] = [];
       for (const [, info] of camelNodeTerms) {
-        // Multi-term CamelCase matches are extremely relevant — a class matching
-        // 3+ query terms in its name (e.g., ExtensionHostProcess) is almost
-        // certainly what the user wants. Scale aggressively.
-        info.result.score = info.result.score * (1 + info.termCount) + (info.termCount - 1) * 30;
+        info.result.score += (info.termCount - 1) * 15;
         camelResults.push(info.result);
       }
       camelResults.sort((a, b) => b.score - a.score);
-      const maxCamelTotal = opts.searchLimit;
+      const maxCamelTotal = Math.ceil(opts.searchLimit / 2);
       for (const r of camelResults.slice(0, maxCamelTotal)) {
         searchResults.push(r);
         searchIdSet.add(r.node.id);
@@ -721,13 +697,6 @@ export class ContextBuilder {
     // If someone searches "terminal" and finds `import { TerminalPanel }`,
     // they want the TerminalPanel class, not the import statement
     filteredResults = this.resolveImportsToDefinitions(filteredResults);
-
-    // Cap entry points so traversal budget isn't spread too thin.
-    // With 36 entry points and maxNodes=120, each gets only 3 nodes — useless.
-    // Cap to searchLimit so each entry point gets a meaningful traversal budget.
-    if (filteredResults.length > opts.searchLimit) {
-      filteredResults = filteredResults.slice(0, opts.searchLimit);
-    }
 
     // Add entry points to subgraph
     for (const result of filteredResults) {
