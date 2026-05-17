@@ -411,7 +411,12 @@ program
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.init(projectPath, { index: false });
+      const { promptSemanticSearchConfig } = await import('../semantic-config-prompt');
+      const semanticConfig = await promptSemanticSearchConfig(clack);
+      const cg = await CodeGraph.init(projectPath, {
+        index: false,
+        config: semanticConfig,
+      });
       clack.log.success(`Initialized in ${projectPath}`);
 
       if (options.index) {

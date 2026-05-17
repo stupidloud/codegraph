@@ -176,7 +176,9 @@ async function initializeLocalProject(clack: typeof import('@clack/prompts')): P
   }
 
   // Initialize
-  const cg = await CodeGraph.init(projectPath);
+  const { promptSemanticSearchConfig } = await import('../semantic-config-prompt');
+  const semanticConfig = await promptSemanticSearchConfig(clack);
+  const cg = await CodeGraph.init(projectPath, { config: semanticConfig });
   clack.log.success('Created .codegraph/ directory');
 
   // Index the project with shimmer progress (worker thread for smooth animation)
