@@ -56,6 +56,7 @@ describe('CodeGraph Foundation', () => {
 
       const content = fs.readFileSync(gitignorePath, 'utf-8');
       expect(content).toContain('*.db');
+      expect(content).toContain('config.json');
 
       cg.close();
     });
