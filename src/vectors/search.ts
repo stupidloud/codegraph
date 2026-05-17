@@ -8,16 +8,7 @@
 import { SqliteDatabase } from '../db/sqlite-adapter';
 import { Node } from '../types';
 import { TextEmbedder, EMBEDDING_DIMENSION } from './embedder';
-import * as path from 'path';
-
-type SqliteVssModule = {
-  getVectorLoadablePath?: () => string;
-  getVssLoadablePath?: () => string;
-  default?: {
-    getVectorLoadablePath?: () => string;
-    getVssLoadablePath?: () => string;
-  };
-};
+import { SqliteVssLoadablePaths } from './sqlite-vss-probe';
 
 /**
  * Options for vector search
@@ -42,10 +33,12 @@ export class VectorSearchManager {
   private db: SqliteDatabase;
   private vssEnabled = false;
   private embeddingDimension: number;
+  private vssLoadablePaths?: SqliteVssLoadablePaths;
 
-  constructor(db: SqliteDatabase, dimension: number = EMBEDDING_DIMENSION) {
+  constructor(db: SqliteDatabase, dimension: number = EMBEDDING_DIMENSION, vssLoadablePaths?: SqliteVssLoadablePaths) {
     this.db = db;
     this.embeddingDimension = dimension;
+    this.vssLoadablePaths = vssLoadablePaths;
   }
 
   /**
@@ -55,20 +48,23 @@ export class VectorSearchManager {
    * search if the extension is not available.
    */
   async initialize(): Promise<void> {
-    try {
-      // Try to load sqlite-vss extension
-      await this.loadVssExtension();
-      this.vssEnabled = true;
-      console.error('sqlite-vss extension loaded successfully');
+    if (this.vssLoadablePaths) {
+      try {
+        this.loadVssExtension(this.vssLoadablePaths);
+        this.vssEnabled = true;
+        console.error('sqlite-vss extension loaded successfully');
 
-      // Create the VSS virtual table
-      this.createVssTable();
-    } catch (error) {
-      // Fall back to brute-force search
-      console.warn(
-        'sqlite-vss extension not available, falling back to brute-force search:',
-        error instanceof Error ? error.message : String(error)
-      );
+        // Create the VSS virtual table
+        this.createVssTable();
+      } catch (error) {
+        // Fall back to brute-force search
+        console.warn(
+          'sqlite-vss extension not available, falling back to brute-force search:',
+          error instanceof Error ? error.message : String(error)
+        );
+        this.vssEnabled = false;
+      }
+    } else {
       this.vssEnabled = false;
     }
 
@@ -79,54 +75,19 @@ export class VectorSearchManager {
   /**
    * Load the sqlite-vss extension
    */
-  private async loadVssExtension(): Promise<void> {
+  private loadVssExtension(loadablePaths: SqliteVssLoadablePaths): void {
     try {
-      // The sqlite-vss npm package provides functions to load extensions
-      const vss = await import('sqlite-vss') as SqliteVssModule;
       const sqliteDb = this.db as any;
-      const getVectorLoadablePath = vss.getVectorLoadablePath ?? vss.default?.getVectorLoadablePath;
-      const getVssLoadablePath = vss.getVssLoadablePath ?? vss.default?.getVssLoadablePath;
 
       if (typeof sqliteDb.loadExtension !== 'function') {
         throw new Error('SQLite connection does not support loadExtension');
       }
 
-      if (typeof getVectorLoadablePath !== 'function' || typeof getVssLoadablePath !== 'function') {
-        throw new Error('sqlite-vss loadable path functions not found');
-      }
-
-      this.loadExtensionWithFallback(sqliteDb, getVectorLoadablePath());
-      this.loadExtensionWithFallback(sqliteDb, getVssLoadablePath());
+      sqliteDb.loadExtension(loadablePaths.vector);
+      sqliteDb.loadExtension(loadablePaths.vss);
     } catch (error) {
       throw new Error(`Failed to load sqlite-vss: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }
-
-  private loadExtensionWithFallback(sqliteDb: { loadExtension(file: string): void }, loadablePath: string): void {
-    const withoutPlatformSuffix = this.stripPlatformExtensionSuffix(loadablePath);
-    const candidates = withoutPlatformSuffix === loadablePath
-      ? [loadablePath]
-      : [withoutPlatformSuffix, loadablePath];
-    const errors: string[] = [];
-
-    for (const candidate of candidates) {
-      try {
-        sqliteDb.loadExtension(candidate);
-        return;
-      } catch (error) {
-        errors.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
-    throw new Error(errors.join('; '));
-  }
-
-  private stripPlatformExtensionSuffix(loadablePath: string): string {
-    const ext = path.extname(loadablePath);
-    if (ext === '.so' || ext === '.dylib' || ext === '.dll') {
-      return loadablePath.slice(0, -ext.length);
-    }
-    return loadablePath;
   }
 
   /**
@@ -558,7 +519,8 @@ export class VectorSearchManager {
  */
 export function createVectorSearch(
   db: SqliteDatabase,
-  dimension?: number
+  dimension?: number,
+  vssLoadablePaths?: SqliteVssLoadablePaths
 ): VectorSearchManager {
-  return new VectorSearchManager(db, dimension);
+  return new VectorSearchManager(db, dimension, vssLoadablePaths);
 }

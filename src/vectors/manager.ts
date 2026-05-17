@@ -8,6 +8,7 @@ import { SqliteDatabase } from '../db/sqlite-adapter';
 import { Node, SearchResult, SearchOptions } from '../types';
 import { TextEmbedder, createEmbedder, EmbedderOptions } from './embedder';
 import { VectorSearchManager, createVectorSearch } from './search';
+import { SqliteVssLoadablePaths } from './sqlite-vss-probe';
 import { QueryBuilder } from '../db/queries';
 import * as crypto from 'crypto';
 
@@ -37,6 +38,9 @@ export interface VectorManagerOptions {
 
   /** Batch size for embedding generation */
   batchSize?: number;
+
+  /** Init-probed sqlite-vss extension paths for ANN search */
+  sqliteVssLoadablePaths?: SqliteVssLoadablePaths;
 }
 
 /**
@@ -74,7 +78,11 @@ export class VectorManager {
     options: VectorManagerOptions = {}
   ) {
     this.embedder = createEmbedder(options.embedder);
-    this.searchManager = createVectorSearch(db, this.embedder.getDimension());
+    this.searchManager = createVectorSearch(
+      db,
+      this.embedder.getDimension(),
+      options.sqliteVssLoadablePaths
+    );
     this.queries = queries;
     this.nodeKinds = options.nodeKinds || DEFAULT_NODE_KINDS;
     this.batchSize = options.batchSize || 32;

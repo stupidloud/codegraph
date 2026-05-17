@@ -12,6 +12,7 @@ import * as os from 'os';
 import CodeGraph from '../src/index';
 import { TextEmbedder } from '../src/vectors/embedder';
 import { VectorSearchManager, createVectorSearch } from '../src/vectors/search';
+import { probeSqliteVss } from '../src/vectors/sqlite-vss-probe';
 import { DatabaseConnection } from '../src/db';
 
 describe('Vector Embeddings', () => {
@@ -211,6 +212,42 @@ describe('Vector Embeddings', () => {
     });
   });
 
+  describe('sqlite-vss probe', () => {
+    it('should report sqlite-vss as available when the child probe exits successfully', () => {
+      const spawnSync = vi.fn().mockReturnValue({
+        status: 0,
+        signal: null,
+        output: [],
+        pid: 123,
+        stdout: JSON.stringify({ vector: '/tmp/vector0', vss: '/tmp/vss0' }),
+        stderr: '',
+      });
+
+      const result = probeSqliteVss(5000, spawnSync);
+
+      expect(result.available).toBe(true);
+      expect(result.checkedAt).toBeTypeOf('number');
+      expect(result.loadablePaths).toEqual({ vector: '/tmp/vector0', vss: '/tmp/vss0' });
+      expect(result.reason).toBeUndefined();
+    });
+
+    it('should report sqlite-vss as unavailable when the child probe is killed by SIGILL', () => {
+      const spawnSync = vi.fn().mockReturnValue({
+        status: null,
+        signal: 'SIGILL',
+        output: [],
+        pid: 123,
+        stdout: '',
+        stderr: '',
+      });
+
+      const result = probeSqliteVss(5000, spawnSync);
+
+      expect(result.available).toBe(false);
+      expect(result.reason).toContain('SIGILL');
+    });
+  });
+
   describe('VectorSearchManager', () => {
     let tempDir: string;
     let db: DatabaseConnection;
@@ -242,6 +279,14 @@ describe('Vector Embeddings', () => {
       expect(retrieved).not.toBeNull();
       expect(retrieved?.length).toBe(3);
       expect(retrieved?.[0]).toBeCloseTo(0.1, 5);
+    });
+
+    it('should skip sqlite-vss loading when disabled', async () => {
+      searchManager = createVectorSearch(db.getDb(), TEST_DIMENSION);
+
+      await searchManager.initialize();
+
+      expect(searchManager.isVssEnabled()).toBe(false);
     });
 
     it('should return null for non-existent vectors', async () => {
