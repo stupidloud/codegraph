@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { encode } from 'gpt-tokenizer';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -14,6 +15,7 @@ import { TextEmbedder } from '../src/vectors/embedder';
 import { VectorSearchManager, createVectorSearch } from '../src/vectors/search';
 import { probeSqliteVss } from '../src/vectors/sqlite-vss-probe';
 import { DatabaseConnection } from '../src/db';
+import { validateConfig } from '../src/config';
 
 describe('Vector Embeddings', () => {
   describe('TextEmbedder', () => {
@@ -132,7 +134,7 @@ describe('Vector Embeddings', () => {
         expect(url).toContain(':batchEmbedContents');
         const body = JSON.parse((fetchMock as any).mock.calls[0][1].body);
         expect(body.requests).toHaveLength(2);
-        expect(body.requests[0].model).toBe('models/gemini-embedding-2');
+        expect(body.requests[0].model).toBe('models/gemini-embedding-001');
         expect(body.requests[0].outputDimensionality).toBe(3);
         expect(body.requests[0].taskType).toBe('RETRIEVAL_DOCUMENT');
         expect(body.requests[0].content.parts).toHaveLength(1);
@@ -165,7 +167,33 @@ describe('Vector Embeddings', () => {
         expect(body.requests[0].taskType).toBe('CODE_RETRIEVAL_QUERY');
       });
 
-      it('should throttle Gemini requests with a weighted sliding 100 RPM window', async () => {
+      it('should truncate Gemini embedding-001 inputs to the token limit', async () => {
+        const fetchMock = vi.fn(async (_url, init) => {
+          const body = JSON.parse((init as RequestInit).body as string);
+          return {
+            ok: true,
+            json: async () => ({
+              embeddings: body.requests.map(() => ({ values: [0.1, 0.2, 0.3] })),
+            }),
+          };
+        }) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        const embedder = new TextEmbedder({
+          apiKey: 'test-key',
+          outputDimensionality: 3,
+        });
+        await embedder.initialize();
+
+        await embedder.embedBatch(['token '.repeat(3000)], 'document');
+
+        const body = JSON.parse((fetchMock as any).mock.calls[0][1].body);
+        const text = body.requests[0].content.parts[0].text;
+        expect(encode(text).length).toBeLessThanOrEqual(2048);
+        expect(encode(text).length).toBeGreaterThan(2000);
+      });
+
+      it('should throttle Gemini batch inputs as individual quota requests', async () => {
         vi.useFakeTimers();
         const fetchMock = vi.fn(async (_url, init) => {
           const body = JSON.parse((init as RequestInit).body as string);
@@ -191,14 +219,14 @@ describe('Vector Embeddings', () => {
           await embedder.embedBatch(batch, 'document');
           await embedder.embedBatch(batch, 'document');
 
-          const fourthBatch = embedder.embedBatch(batch, 'document');
+          const nextBatch = embedder.embedBatch(batch, 'document');
           await Promise.resolve();
 
           expect(fetchMock).toHaveBeenCalledTimes(3);
           await vi.advanceTimersByTimeAsync(59_999);
           expect(fetchMock).toHaveBeenCalledTimes(3);
           await vi.advanceTimersByTimeAsync(1);
-          await fourthBatch;
+          await nextBatch;
           expect(fetchMock).toHaveBeenCalledTimes(4);
         } finally {
           vi.useRealTimers();
@@ -267,10 +295,233 @@ describe('Vector Embeddings', () => {
         expect(fetchMock).toHaveBeenCalledTimes(1);
       });
 
+      it('should call Jina embeddings API for multiple input texts', async () => {
+        const fetchMock = vi.fn(async () => ({
+          ok: true,
+          json: async () => ({
+            data: [
+              { embedding: [0.1, 0.2, 0.3] },
+              { embedding: [0.4, 0.5, 0.6] },
+            ],
+          }),
+        })) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        const embedder = new TextEmbedder({
+          provider: 'jina',
+          apiKey: 'jina-test-key',
+          outputDimensionality: 3,
+        });
+        await embedder.initialize();
+
+        const result = await embedder.embedBatch(['node one', 'node two'], 'document');
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(result.model).toBe('jina-embeddings-v5-text-nano');
+        expect(result.embeddings).toHaveLength(2);
+        expect(result.embeddings[1]![0]).toBeCloseTo(0.4);
+        const url = (fetchMock as any).mock.calls[0][0];
+        expect(url).toBe('https://api.jina.ai/v1/embeddings');
+        const init = (fetchMock as any).mock.calls[0][1];
+        expect(init.headers.Authorization).toBe('Bearer jina-test-key');
+        const body = JSON.parse(init.body);
+        expect(body.model).toBe('jina-embeddings-v5-text-nano');
+        expect(body.normalized).toBe(true);
+        expect(body.embedding_type).toBe('float');
+        expect(body.truncate).toBe(true);
+        expect(body.input).toEqual(['Document: node one', 'Document: node two']);
+      });
+
+      it('should not apply a local character cap to Jina inputs', async () => {
+        const fetchMock = vi.fn(async () => ({
+          ok: true,
+          json: async () => ({
+            data: [{ embedding: [0.1, 0.2, 0.3] }],
+          }),
+        })) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        const embedder = new TextEmbedder({
+          provider: 'jina',
+          apiKey: 'jina-test-key',
+          outputDimensionality: 3,
+        });
+        await embedder.initialize();
+
+        await embedder.embedBatch(['x'.repeat(10000)], 'document');
+
+        const body = JSON.parse((fetchMock as any).mock.calls[0][1].body);
+        expect(body.input[0]).toHaveLength('Document: '.length + 10000);
+        expect(body.truncate).toBe(true);
+      });
+
+      it('should use Query prefix for Jina query embeddings', async () => {
+        const fetchMock = vi.fn(async () => ({
+          ok: true,
+          json: async () => ({
+            data: [{ embedding: [0.1, 0.2, 0.3] }],
+          }),
+        })) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        const embedder = new TextEmbedder({
+          provider: 'jina',
+          apiKey: 'jina-test-key',
+          outputDimensionality: 3,
+        });
+        await embedder.initialize();
+
+        await embedder.embedQuery('find auth code');
+
+        const body = JSON.parse((fetchMock as any).mock.calls[0][1].body);
+        expect(body.input).toEqual(['Query: find auth code']);
+      });
+
+      it('should throttle Jina batches as HTTP requests', async () => {
+        vi.useFakeTimers();
+        const fetchMock = vi.fn(async () => ({
+          ok: true,
+          json: async () => ({
+            data: Array.from({ length: 32 }, () => ({ embedding: [0.1, 0.2, 0.3] })),
+          }),
+        })) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        try {
+          vi.setSystemTime(1_000);
+          const embedder = new TextEmbedder({
+            provider: 'jina',
+            apiKey: 'jina-test-key',
+            outputDimensionality: 3,
+          });
+          await embedder.initialize();
+
+          const batch = Array.from({ length: 32 }, (_, i) => `node ${i}`);
+          for (let i = 0; i < 100; i++) {
+            await embedder.embedBatch(batch, 'document');
+          }
+
+          const nextBatch = embedder.embedBatch(batch, 'document');
+          await Promise.resolve();
+
+          expect(fetchMock).toHaveBeenCalledTimes(100);
+          await vi.advanceTimersByTimeAsync(59_999);
+          expect(fetchMock).toHaveBeenCalledTimes(100);
+          await vi.advanceTimersByTimeAsync(1);
+          await nextBatch;
+          expect(fetchMock).toHaveBeenCalledTimes(101);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('should reject mismatched Jina embedding response counts', async () => {
+        const fetchMock = vi.fn(async () => ({
+          ok: true,
+          json: async () => ({
+            data: [{ embedding: [0.1, 0.2, 0.3] }],
+          }),
+        })) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        const embedder = new TextEmbedder({
+          provider: 'jina',
+          apiKey: 'jina-test-key',
+          outputDimensionality: 3,
+        });
+        await embedder.initialize();
+
+        await expect(embedder.embedBatch(['node one', 'node two'], 'document')).rejects.toThrow(
+          'Jina batch embedding response count did not match request count'
+        );
+      });
+
+      it('should retry retryable Jina errors with exponential backoff', async () => {
+        vi.useFakeTimers();
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValueOnce({
+            ok: false,
+            status: 429,
+            statusText: 'Too Many Requests',
+            headers: new Headers(),
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              data: [{ embedding: [0.1, 0.2, 0.3] }],
+            }),
+          }) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        try {
+          const embedder = new TextEmbedder({
+            provider: 'jina',
+            apiKey: 'jina-test-key',
+            outputDimensionality: 3,
+          });
+          await embedder.initialize();
+
+          const resultPromise = embedder.embedBatch(['node one'], 'document');
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(1_000);
+
+          const result = await resultPromise;
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+          expect(result.embeddings[0]![0]).toBeCloseTo(0.1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('should require an API key before initialization', async () => {
         const embedder = new TextEmbedder();
         await expect(embedder.initialize()).rejects.toThrow(/api key/i);
       });
+    });
+  });
+
+  describe('semantic search config validation', () => {
+    it('should accept Jina as a semantic search provider', () => {
+      expect(validateConfig({
+        version: 1,
+        rootDir: '.',
+        include: ['**/*.ts'],
+        exclude: [],
+        languages: [],
+        frameworks: [],
+        maxFileSize: 1024,
+        extractDocstrings: true,
+        trackCallSites: true,
+        semanticSearch: {
+          enabled: true,
+          provider: 'jina',
+          apiKey: 'jina-test-key',
+          model: 'jina-embeddings-v5-text-nano',
+          outputDimensionality: 768,
+          batchSize: 32,
+        },
+      })).toBe(true);
+    });
+
+    it('should reject unknown semantic search providers', () => {
+      expect(validateConfig({
+        version: 1,
+        rootDir: '.',
+        include: ['**/*.ts'],
+        exclude: [],
+        languages: [],
+        frameworks: [],
+        maxFileSize: 1024,
+        extractDocstrings: true,
+        trackCallSites: true,
+        semanticSearch: {
+          enabled: true,
+          provider: 'unknown',
+        },
+      })).toBe(false);
     });
   });
 

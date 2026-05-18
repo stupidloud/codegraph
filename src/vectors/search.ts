@@ -52,16 +52,11 @@ export class VectorSearchManager {
       try {
         this.loadVssExtension(this.vssLoadablePaths);
         this.vssEnabled = true;
-        console.error('sqlite-vss extension loaded successfully');
 
         // Create the VSS virtual table
         this.createVssTable();
-      } catch (error) {
-        // Fall back to brute-force search
-        console.warn(
-          'sqlite-vss extension not available, falling back to brute-force search:',
-          error instanceof Error ? error.message : String(error)
-        );
+      } catch {
+        // Fall back to brute-force search silently.
         this.vssEnabled = false;
       }
     } else {
@@ -221,13 +216,9 @@ export class VectorSearchManager {
           .prepare('INSERT INTO vss_map (rowid, node_id) VALUES (?, ?)')
           .run(newRowid, nodeId);
       }
-    } catch (error) {
+    } catch {
       // VSS operations can fail for various reasons (dimension mismatch, etc.)
-      // Fall back to brute-force search silently
-      console.warn(
-        'VSS storage failed, using brute-force search:',
-        error instanceof Error ? error.message : String(error)
-      );
+      // Fall back to brute-force search silently.
     }
   }
 
@@ -363,12 +354,8 @@ export class VectorSearchManager {
           score: 1 / (1 + row.distance),
         }))
         .filter((r) => r.score >= minScore);
-    } catch (error) {
+    } catch {
       // VSS search failed, fall back to brute force
-      console.warn(
-        'VSS search failed, using brute-force:',
-        error instanceof Error ? error.message : String(error)
-      );
       return this.searchBruteForce(queryEmbedding, limit, minScore);
     }
   }

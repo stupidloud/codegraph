@@ -1,6 +1,6 @@
 {
   "name": "@stupidloud/codegraph",
-  "version": "0.7.12",
+  "version": "0.7.13",
   "description": "Supercharge Claude Code with semantic code intelligence. 94% fewer tool calls • 77% faster exploration • 100% local.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -38,6 +38,7 @@
     "commander": "^14.0.2",
     "fast-string-width": "^3.0.2",
     "fast-wrap-ansi": "^0.2.0",
+    "gpt-tokenizer": "^3.4.0",
     "node-sqlite3-wasm": "^0.8.30",
     "picomatch": "^4.0.3",
     "sisteransi": "^1.0.5",

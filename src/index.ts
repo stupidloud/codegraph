@@ -187,6 +187,7 @@ export class CodeGraph {
     const semantic = this.config.semanticSearch!;
     return createVectorManager(this.db.getDb(), this.queries, {
       embedder: {
+        provider: semantic.provider,
         apiKey: semantic.apiKey,
         modelId: semantic.model,
         outputDimensionality: semantic.outputDimensionality,
@@ -1007,7 +1008,7 @@ export class CodeGraph {
   /**
    * Initialize the embedding system
    *
-   * This validates Gemini configuration and initializes the local vector
+   * This validates embedding provider configuration and initializes the local vector
    * search system. Must be called before using semantic search.
    */
   async initializeEmbeddings(): Promise<void> {

@@ -1,4 +1,5 @@
 import * as childProcess from 'child_process';
+import * as path from 'path';
 
 export interface SqliteVssProbeResult {
   available: boolean;
@@ -22,64 +23,9 @@ export function probeSqliteVss(
   timeoutMs: number = 5000,
   spawnSyncFn: SpawnSyncFn = childProcess.spawnSync
 ): SqliteVssProbeResult {
-  const script = `
-    const fs = require('fs');
-    const os = require('os');
-    const path = require('path');
-
-    function stripPlatformExtensionSuffix(loadablePath) {
-      const ext = path.extname(loadablePath);
-      return ext === '.so' || ext === '.dylib' || ext === '.dll'
-        ? loadablePath.slice(0, -ext.length)
-        : loadablePath;
-    }
-
-    function loadWithFallback(db, loadablePath) {
-      const withoutSuffix = stripPlatformExtensionSuffix(loadablePath);
-      const candidates = withoutSuffix === loadablePath ? [loadablePath] : [withoutSuffix, loadablePath];
-      let lastError;
-      for (const candidate of candidates) {
-        try {
-          db.loadExtension(candidate);
-          return candidate;
-        } catch (error) {
-          lastError = error;
-        }
-      }
-      throw lastError;
-    }
-
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-vss-probe-'));
-    const dbPath = path.join(tmpDir, 'probe.db');
-    let db;
-    let exitCode = 0;
-    try {
-      const Database = require('better-sqlite3');
-      const vss = require('sqlite-vss');
-      db = new Database(dbPath);
-      const getVectorLoadablePath = vss.getVectorLoadablePath || vss.default?.getVectorLoadablePath;
-      const getVssLoadablePath = vss.getVssLoadablePath || vss.default?.getVssLoadablePath;
-      if (typeof db.loadExtension !== 'function') {
-        throw new Error('SQLite connection does not support loadExtension');
-      }
-      if (typeof getVectorLoadablePath !== 'function' || typeof getVssLoadablePath !== 'function') {
-        throw new Error('sqlite-vss loadable path functions not found');
-      }
-      const vectorPath = loadWithFallback(db, getVectorLoadablePath());
-      const vssPath = loadWithFallback(db, getVssLoadablePath());
-      db.exec('CREATE VIRTUAL TABLE probe_vectors USING vss0(embedding(3));');
-      process.stdout.write(JSON.stringify({ vector: vectorPath, vss: vssPath }));
-    } catch (error) {
-      process.stderr.write(error && error.stack ? error.stack : String(error));
-      exitCode = 1;
-    } finally {
-      try { if (db) db.close(); } catch {}
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    }
-    process.exit(exitCode);
-  `;
-
-  const result = spawnSyncFn(process.execPath, ['-e', script], {
+  const packageRoot = path.resolve(__dirname, '..', '..');
+  const childScript = path.join(__dirname, 'sqlite-vss-probe-child.js');
+  const result = spawnSyncFn(process.execPath, [childScript, packageRoot], {
     encoding: 'utf8',
     timeout: timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'],

@@ -490,13 +490,13 @@ export interface CodeGraphConfig {
 
   /** Optional semantic search configuration */
   semanticSearch?: {
-    /** Enable Gemini-backed semantic embeddings */
+    /** Enable remote-provider-backed semantic embeddings */
     enabled: boolean;
     /** Embedding provider */
-    provider: 'gemini';
-    /** Gemini API key. Stored in project config when enabled. */
+    provider: 'gemini' | 'jina';
+    /** Embedding provider API key. Stored in project config when enabled. */
     apiKey?: string;
-    /** Gemini embedding model */
+    /** Embedding model */
     model?: string;
     /** Requested embedding dimension */
     outputDimensionality?: number;
@@ -724,9 +724,9 @@ export const DEFAULT_CONFIG: CodeGraphConfig = {
   semanticSearch: {
     enabled: false,
     provider: 'gemini',
-    model: 'gemini-embedding-2',
+    model: 'gemini-embedding-001',
     outputDimensionality: 768,
-    batchSize: 36,
+    batchSize: 32,
   },
 };
 

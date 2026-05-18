@@ -1,16 +1,24 @@
 /**
  * Text Embedder
  *
- * Generates vector embeddings through the Gemini API. Vector storage and
- * similarity search remain local.
+ * Generates vector embeddings through remote embedding APIs. Vector storage
+ * and similarity search remain local.
  */
 
+import { decode, encode } from 'gpt-tokenizer';
+
 /**
- * Default Gemini embedding model.
+ * Default embedding models.
  */
-export const DEFAULT_MODEL = 'gemini-embedding-2';
+export type EmbeddingProvider = 'gemini' | 'jina';
+export const DEFAULT_PROVIDER: EmbeddingProvider = 'gemini';
+export const DEFAULT_MODEL = 'gemini-embedding-001';
+export const DEFAULT_GEMINI_MODEL = 'gemini-embedding-001';
+export const DEFAULT_JINA_MODEL = 'jina-embeddings-v5-text-nano';
 export const EMBEDDING_DIMENSION = 768;
 const GEMINI_EMBEDDING_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
+const JINA_EMBEDDING_ENDPOINT = 'https://api.jina.ai/v1/embeddings';
+const GEMINI_EMBEDDING_001_MAX_TOKENS = 2048;
 const MAX_REQUESTS_PER_MINUTE = 100;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const MAX_RETRY_ATTEMPTS = 3;
@@ -23,13 +31,16 @@ const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
  * Options for the embedder
  */
 export interface EmbedderOptions {
-  /** Gemini API key */
+  /** Embedding provider */
+  provider?: EmbeddingProvider;
+
+  /** Embedding provider API key */
   apiKey?: string;
 
-  /** Model ID to use (default: gemini-embedding-2) */
+  /** Model ID to use */
   modelId?: string;
 
-  /** Embedding dimension to request from Gemini */
+  /** Embedding dimension to request */
   outputDimensionality?: number;
 
   /** Whether to show progress during embedding generation */
@@ -71,14 +82,19 @@ type GeminiEmbeddingResponse = {
   embeddings?: Array<{ values?: number[] }>;
 };
 
+type JinaEmbeddingResponse = {
+  data?: Array<{ embedding?: number[] }>;
+};
+
 /**
- * Text Embedder using Gemini.
+ * Text Embedder using a remote embedding provider.
  *
- * Batch generation uses batchEmbedContents with one request per node text. Do
- * not combine multiple nodes into one content.parts array because that produces
- * a single aggregate embedding instead of node-level vectors.
+ * Gemini batch generation uses batchEmbedContents with one request per node
+ * text. Do not combine multiple nodes into one content.parts array because
+ * that produces a single aggregate embedding instead of node-level vectors.
  */
 export class TextEmbedder {
+  private provider: EmbeddingProvider;
   private apiKey?: string;
   private modelId: string;
   private dimension: number;
@@ -87,8 +103,9 @@ export class TextEmbedder {
   private rateLimitQueue: Promise<void> = Promise.resolve();
 
   constructor(options: EmbedderOptions = {}) {
+    this.provider = options.provider || DEFAULT_PROVIDER;
     this.apiKey = options.apiKey;
-    this.modelId = options.modelId || DEFAULT_MODEL;
+    this.modelId = options.modelId || this.getDefaultModelForProvider(this.provider);
     this.dimension = options.outputDimensionality || EMBEDDING_DIMENSION;
   }
 
@@ -101,7 +118,7 @@ export class TextEmbedder {
     }
 
     if (!this.apiKey) {
-      throw new Error('Gemini API key is required for semantic search');
+      throw new Error(`${this.getProviderDisplayName()} API key is required for semantic search`);
     }
 
     this.initialized = true;
@@ -135,7 +152,7 @@ export class TextEmbedder {
     const result = await this.embedBatch([text], 'document');
     const embedding = result.embeddings[0];
     if (!embedding) {
-      throw new Error('Gemini embedding response did not include values');
+      throw new Error(`${this.getProviderDisplayName()} embedding response did not include values`);
     }
     return {
       embedding,
@@ -151,7 +168,7 @@ export class TextEmbedder {
     const result = await this.embedBatch([query], 'search_query');
     const embedding = result.embeddings[0];
     if (!embedding) {
-      throw new Error('Gemini embedding response did not include values');
+      throw new Error(`${this.getProviderDisplayName()} embedding response did not include values`);
     }
     return {
       embedding,
@@ -181,10 +198,7 @@ export class TextEmbedder {
     }
 
     const startTime = Date.now();
-    const embeddings = await this.embedPreparedBatch(
-      texts.map((text) => this.prepareText(text)),
-      type
-    );
+    const embeddings = await this.embedPreparedBatch(texts, type);
 
     return {
       embeddings,
@@ -202,9 +216,21 @@ export class TextEmbedder {
       throw new Error('Embedder not initialized. Call initialize() first.');
     }
 
+    if (this.provider === 'jina') {
+      return this.embedPreparedBatchWithJina(texts, type);
+    }
+
+    return this.embedPreparedBatchWithGemini(texts, type);
+  }
+
+  private async embedPreparedBatchWithGemini(
+    texts: string[],
+    type: 'document' | 'search_query'
+  ): Promise<Float32Array[]> {
     const url = `${GEMINI_EMBEDDING_ENDPOINT}/${encodeURIComponent(this.modelId)}:batchEmbedContents`;
     const model = `models/${this.modelId}`;
     const taskType = type === 'search_query' ? 'CODE_RETRIEVAL_QUERY' : 'RETRIEVAL_DOCUMENT';
+    const preparedTexts = texts.map((text) => this.prepareGeminiText(text));
     await this.throttleRequests(texts.length);
     const response = await this.fetchWithRetry(url, {
       method: 'POST',
@@ -213,7 +239,7 @@ export class TextEmbedder {
         'x-goog-api-key': this.apiKey!,
       },
       body: JSON.stringify({
-        requests: texts.map((text) => ({
+        requests: preparedTexts.map((text) => ({
           model,
           content: {
             parts: [{ text }],
@@ -249,6 +275,51 @@ export class TextEmbedder {
     return embeddings;
   }
 
+  private async embedPreparedBatchWithJina(
+    texts: string[],
+    type: 'document' | 'search_query'
+  ): Promise<Float32Array[]> {
+    await this.throttleRequests(1);
+    const response = await this.fetchWithRetry(JINA_EMBEDDING_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.apiKey!}`,
+      },
+      body: JSON.stringify({
+        model: this.modelId,
+        input: texts.map((text) => this.prepareJinaText(text, type)),
+        normalized: true,
+        embedding_type: 'float',
+        truncate: true,
+      }),
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`Jina embedding request failed (${response.status}): ${body || response.statusText}`);
+    }
+
+    const json = await response.json() as JinaEmbeddingResponse;
+    const values = json.data?.map((embedding) => embedding.embedding);
+    if (!values || values.length !== texts.length) {
+      throw new Error('Jina batch embedding response count did not match request count');
+    }
+
+    const embeddings = values.map((embeddingValues) => {
+      if (!embeddingValues || embeddingValues.length === 0) {
+        throw new Error('Jina embedding response did not include values');
+      }
+      return new Float32Array(embeddingValues);
+    });
+
+    if (embeddings.some((embedding) => embedding.length !== embeddings[0]!.length)) {
+      throw new Error('Jina batch embedding response contained mixed dimensions');
+    }
+
+    return embeddings;
+  }
+
   private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
     let lastNetworkError: unknown;
 
@@ -272,7 +343,7 @@ export class TextEmbedder {
 
     throw lastNetworkError instanceof Error
       ? lastNetworkError
-      : new Error(`Gemini embedding request failed: ${String(lastNetworkError)}`);
+      : new Error(`${this.getProviderDisplayName()} embedding request failed: ${String(lastNetworkError)}`);
   }
 
   private isRetryableStatus(status: number): boolean {
@@ -320,7 +391,7 @@ export class TextEmbedder {
   private async reserveRequestSlots(cost: number): Promise<void> {
     if (cost > MAX_REQUESTS_PER_MINUTE) {
       throw new Error(
-        `Gemini embedding batch size ${cost} exceeds the ${MAX_REQUESTS_PER_MINUTE} requests-per-minute limit`
+        `${this.getProviderDisplayName()} embedding batch size ${cost} exceeds the ${MAX_REQUESTS_PER_MINUTE} requests-per-minute limit`
       );
     }
 
@@ -342,12 +413,33 @@ export class TextEmbedder {
     }
   }
 
-  /**
-   * Prepare text for retrieval-oriented embedding.
-   */
-  private prepareText(text: string): string {
-    const maxLength = 8192;
-    return text.length > maxLength ? text.slice(0, maxLength) : text;
+  private prepareGeminiText(text: string): string {
+    const maxTokens = this.getGeminiMaxInputTokens();
+    if (!maxTokens) {
+      return text;
+    }
+
+    const tokens = encode(text);
+    return tokens.length > maxTokens ? decode(tokens.slice(0, maxTokens)) : text;
+  }
+
+  private getGeminiMaxInputTokens(): number | undefined {
+    if (this.modelId === DEFAULT_GEMINI_MODEL) {
+      return GEMINI_EMBEDDING_001_MAX_TOKENS;
+    }
+    return undefined;
+  }
+
+  private prepareJinaText(text: string, type: 'document' | 'search_query'): string {
+    return `${type === 'search_query' ? 'Query' : 'Document'}: ${text}`;
+  }
+
+  private getDefaultModelForProvider(provider: EmbeddingProvider): string {
+    return provider === 'jina' ? DEFAULT_JINA_MODEL : DEFAULT_GEMINI_MODEL;
+  }
+
+  private getProviderDisplayName(): string {
+    return this.provider === 'jina' ? 'Jina' : 'Gemini';
   }
 
   /**
