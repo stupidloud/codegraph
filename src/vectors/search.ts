@@ -10,6 +10,13 @@ import { Node } from '../types';
 import { TextEmbedder, EMBEDDING_DIMENSION } from './embedder';
 import { SqliteVssLoadablePaths } from './sqlite-vss-probe';
 
+function stripPlatformExtensionSuffix(loadablePath: string): string {
+  const ext = loadablePath.slice(loadablePath.lastIndexOf('.'));
+  return ext === '.so' || ext === '.dylib' || ext === '.dll'
+    ? loadablePath.slice(0, -ext.length)
+    : loadablePath;
+}
+
 /**
  * Options for vector search
  */
@@ -78,8 +85,8 @@ export class VectorSearchManager {
         throw new Error('SQLite connection does not support loadExtension');
       }
 
-      sqliteDb.loadExtension(loadablePaths.vector);
-      sqliteDb.loadExtension(loadablePaths.vss);
+      sqliteDb.loadExtension(stripPlatformExtensionSuffix(loadablePaths.vector));
+      sqliteDb.loadExtension(stripPlatformExtensionSuffix(loadablePaths.vss));
     } catch (error) {
       throw new Error(`Failed to load sqlite-vss: ${error instanceof Error ? error.message : String(error)}`);
     }

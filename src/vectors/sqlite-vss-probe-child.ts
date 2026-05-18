@@ -15,17 +15,8 @@ function loadWithFallback(
   loadablePath: string
 ): string {
   const withoutSuffix = stripPlatformExtensionSuffix(loadablePath);
-  const candidates = withoutSuffix === loadablePath ? [loadablePath] : [withoutSuffix, loadablePath];
-  let lastError: unknown;
-  for (const candidate of candidates) {
-    try {
-      db.loadExtension(candidate);
-      return candidate;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError;
+  db.loadExtension(withoutSuffix);
+  return withoutSuffix;
 }
 
 interface ProbeDatabase {
