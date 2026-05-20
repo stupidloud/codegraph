@@ -318,14 +318,14 @@ export class TextEmbedder {
           return response;
         }
 
-        await this.sleep(this.getRetryDelayMs(attempt, response));
+        await this.sleep(await this.getRetryDelayMs(attempt, response));
       } catch (error) {
         lastNetworkError = error;
         if (attempt === MAX_RETRY_ATTEMPTS) {
           break;
         }
 
-        await this.sleep(this.getRetryDelayMs(attempt));
+        await this.sleep(await this.getRetryDelayMs(attempt));
       }
     }
 
@@ -338,32 +338,51 @@ export class TextEmbedder {
     return RETRYABLE_STATUS_CODES.has(status);
   }
 
-  private getRetryDelayMs(attempt: number, response?: Response): number {
-    const retryAfterMs = this.getRetryAfterMs(response);
+  private async getRetryDelayMs(attempt: number, response?: Response): Promise<number> {
+    const retryInfoDelayMs = await this.getRetryInfoDelayMs(response);
     const exponentialDelay = Math.min(
       INITIAL_RETRY_DELAY_MS * Math.pow(RETRY_DELAY_MULTIPLIER, attempt),
       MAX_RETRY_DELAY_MS
     );
-    return Math.max(retryAfterMs ?? 0, exponentialDelay);
+    return Math.max(retryInfoDelayMs ?? 0, exponentialDelay);
   }
 
-  private getRetryAfterMs(response?: Response): number | undefined {
-    const retryAfter = response?.headers?.get?.('retry-after');
-    if (!retryAfter) {
+  private async getRetryInfoDelayMs(response?: Response): Promise<number | undefined> {
+    const clonedResponse = response?.clone?.();
+    const body = await clonedResponse?.text().catch(() => '');
+    if (!body) {
       return undefined;
     }
 
-    const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0) {
-      return seconds * 1000;
+    try {
+      const parsed = JSON.parse(body) as {
+        error?: { details?: Array<{ '@type'?: string; retryDelay?: string }> };
+      };
+      const retryDelay = parsed.error?.details?.find(
+        (detail) => detail?.['@type'] === 'type.googleapis.com/google.rpc.RetryInfo'
+      )?.retryDelay;
+      return this.parseDurationMs(retryDelay);
+    } catch {
+      return undefined;
     }
+  }
 
-    const retryAt = Date.parse(retryAfter);
-    if (Number.isNaN(retryAt)) {
+  private parseDurationMs(duration?: string): number | undefined {
+    if (!duration) {
       return undefined;
     }
 
-    return Math.max(0, retryAt - Date.now());
+    const match = duration.trim().match(/^(-?\d+(?:\.\d+)?)s$/);
+    if (!match) {
+      return undefined;
+    }
+
+    const seconds = Number(match[1]);
+    if (!Number.isFinite(seconds) || seconds < 0) {
+      return undefined;
+    }
+
+    return Math.ceil(seconds * 1000);
   }
 
   private async sleep(ms: number): Promise<void> {

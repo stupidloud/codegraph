@@ -204,6 +204,59 @@ describe('Vector Embeddings', () => {
         }
       });
 
+      it('should use RetryInfo retryDelay for Gemini retries', async () => {
+        vi.useFakeTimers();
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValueOnce({
+            ok: false,
+            status: 429,
+            statusText: 'Too Many Requests',
+            clone() {
+              return {
+                text: async () => JSON.stringify({
+                  error: {
+                    details: [
+                      {
+                        '@type': 'type.googleapis.com/google.rpc.RetryInfo',
+                        retryDelay: '22.767426985s',
+                      },
+                    ],
+                  },
+                }),
+              };
+            },
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              embeddings: [{ values: [0.1, 0.2, 0.3] }],
+            }),
+          }) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        try {
+          const embedder = new TextEmbedder({
+            apiKey: 'test-key',
+          });
+          await embedder.initialize();
+
+          const resultPromise = embedder.embedBatch(['node one'], 'document');
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(22_767);
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+          await vi.advanceTimersByTimeAsync(1);
+
+          const result = await resultPromise;
+          expect(fetchMock).toHaveBeenCalledTimes(2);
+          expect(result.embeddings[0]![0]).toBeCloseTo(0.1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('should not retry permanent Gemini errors', async () => {
         const fetchMock = vi.fn(async () => ({
           ok: false,
