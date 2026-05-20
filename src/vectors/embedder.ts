@@ -5,21 +5,18 @@
  * and similarity search remain local.
  */
 
-import { decode, encode } from 'gpt-tokenizer';
-
 /**
  * Default embedding models.
  */
 export type EmbeddingProvider = 'gemini' | 'jina';
 export const DEFAULT_PROVIDER: EmbeddingProvider = 'gemini';
-export const DEFAULT_MODEL = 'gemini-embedding-001';
-export const DEFAULT_GEMINI_MODEL = 'gemini-embedding-001';
+export const DEFAULT_MODEL = 'gemini-embedding-2';
+export const DEFAULT_GEMINI_MODEL = 'gemini-embedding-2';
 export const DEFAULT_JINA_MODEL = 'jina-embeddings-v5-text-nano';
 export const EMBEDDING_DIMENSION = 768;
 const GEMINI_EMBEDDING_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const JINA_EMBEDDING_ENDPOINT = 'https://api.jina.ai/v1/embeddings';
-const GEMINI_EMBEDDING_001_MAX_TOKENS = 2048;
-const MAX_REQUESTS_PER_MINUTE = 100;
+const JINA_MAX_REQUESTS_PER_MINUTE = 100;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const MAX_RETRY_ATTEMPTS = 3;
 const INITIAL_RETRY_DELAY_MS = 1_000;
@@ -39,9 +36,6 @@ export interface EmbedderOptions {
 
   /** Model ID to use */
   modelId?: string;
-
-  /** Embedding dimension to request */
-  outputDimensionality?: number;
 
   /** Whether to show progress during embedding generation */
   showProgress?: boolean;
@@ -97,7 +91,6 @@ export class TextEmbedder {
   private provider: EmbeddingProvider;
   private apiKey?: string;
   private modelId: string;
-  private dimension: number;
   private initialized = false;
   private requestTimestamps: Array<{ timestamp: number; cost: number }> = [];
   private rateLimitQueue: Promise<void> = Promise.resolve();
@@ -106,7 +99,6 @@ export class TextEmbedder {
     this.provider = options.provider || DEFAULT_PROVIDER;
     this.apiKey = options.apiKey;
     this.modelId = options.modelId || this.getDefaultModelForProvider(this.provider);
-    this.dimension = options.outputDimensionality || EMBEDDING_DIMENSION;
   }
 
   /**
@@ -142,7 +134,7 @@ export class TextEmbedder {
    * Get the embedding dimension
    */
   getDimension(): number {
-    return this.dimension;
+    return EMBEDDING_DIMENSION;
   }
 
   /**
@@ -191,7 +183,7 @@ export class TextEmbedder {
     if (texts.length === 0) {
       return {
         embeddings: [],
-        dimension: this.dimension,
+        dimension: EMBEDDING_DIMENSION,
         model: this.modelId,
         durationMs: 0,
       };
@@ -202,7 +194,7 @@ export class TextEmbedder {
 
     return {
       embeddings,
-      dimension: embeddings[0]?.length ?? this.dimension,
+      dimension: embeddings[0]?.length ?? EMBEDDING_DIMENSION,
       model: this.modelId,
       durationMs: Date.now() - startTime,
     };
@@ -230,8 +222,6 @@ export class TextEmbedder {
     const url = `${GEMINI_EMBEDDING_ENDPOINT}/${encodeURIComponent(this.modelId)}:batchEmbedContents`;
     const model = `models/${this.modelId}`;
     const taskType = type === 'search_query' ? 'CODE_RETRIEVAL_QUERY' : 'RETRIEVAL_DOCUMENT';
-    const preparedTexts = texts.map((text) => this.prepareGeminiText(text));
-    await this.throttleRequests(texts.length);
     const response = await this.fetchWithRetry(url, {
       method: 'POST',
       headers: {
@@ -239,20 +229,19 @@ export class TextEmbedder {
         'x-goog-api-key': this.apiKey!,
       },
       body: JSON.stringify({
-        requests: preparedTexts.map((text) => ({
+        requests: texts.map((text) => ({
           model,
           content: {
             parts: [{ text }],
           },
           taskType,
-          outputDimensionality: this.dimension,
+          outputDimensionality: EMBEDDING_DIMENSION,
         })),
       }),
     });
 
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`Gemini embedding request failed (${response.status}): ${body || response.statusText}`);
+      throw new Error(await this.formatApiErrorMessage('Gemini', response));
     }
 
     const json = await response.json() as GeminiEmbeddingResponse;
@@ -296,8 +285,7 @@ export class TextEmbedder {
     });
 
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`Jina embedding request failed (${response.status}): ${body || response.statusText}`);
+      throw new Error(await this.formatApiErrorMessage('Jina', response));
     }
 
     const json = await response.json() as JinaEmbeddingResponse;
@@ -389,9 +377,9 @@ export class TextEmbedder {
   }
 
   private async reserveRequestSlots(cost: number): Promise<void> {
-    if (cost > MAX_REQUESTS_PER_MINUTE) {
+    if (cost > JINA_MAX_REQUESTS_PER_MINUTE) {
       throw new Error(
-        `${this.getProviderDisplayName()} embedding batch size ${cost} exceeds the ${MAX_REQUESTS_PER_MINUTE} requests-per-minute limit`
+        `${this.getProviderDisplayName()} embedding batch size ${cost} exceeds the ${JINA_MAX_REQUESTS_PER_MINUTE} requests-per-minute limit`
       );
     }
 
@@ -402,7 +390,7 @@ export class TextEmbedder {
       );
 
       const usedSlots = this.requestTimestamps.reduce((sum, entry) => sum + entry.cost, 0);
-      if (usedSlots + cost <= MAX_REQUESTS_PER_MINUTE) {
+      if (usedSlots + cost <= JINA_MAX_REQUESTS_PER_MINUTE) {
         this.requestTimestamps.push({ timestamp: now, cost });
         return;
       }
@@ -413,25 +401,30 @@ export class TextEmbedder {
     }
   }
 
-  private prepareGeminiText(text: string): string {
-    const maxTokens = this.getGeminiMaxInputTokens();
-    if (!maxTokens) {
-      return text;
-    }
-
-    const tokens = encode(text);
-    return tokens.length > maxTokens ? decode(tokens.slice(0, maxTokens)) : text;
-  }
-
-  private getGeminiMaxInputTokens(): number | undefined {
-    if (this.modelId === DEFAULT_GEMINI_MODEL) {
-      return GEMINI_EMBEDDING_001_MAX_TOKENS;
-    }
-    return undefined;
-  }
-
   private prepareJinaText(text: string, type: 'document' | 'search_query'): string {
     return `${type === 'search_query' ? 'Query' : 'Document'}: ${text}`;
+  }
+
+  private async formatApiErrorMessage(providerName: string, response: Response): Promise<string> {
+    const body = await response.text().catch(() => '');
+    const normalizedBody = this.normalizeErrorBody(body);
+    const status = response.statusText
+      ? `${response.status} ${response.statusText}`
+      : String(response.status);
+    return `${providerName} embedding request failed (${status}): ${normalizedBody || 'No response body'}`;
+  }
+
+  private normalizeErrorBody(body: string): string {
+    const trimmed = body.trim();
+    if (!trimmed) {
+      return '';
+    }
+
+    try {
+      return JSON.stringify(JSON.parse(trimmed));
+    } catch {
+      return trimmed;
+    }
   }
 
   private getDefaultModelForProvider(provider: EmbeddingProvider): string {

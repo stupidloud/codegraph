@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 /**
  * Migration definition
@@ -74,22 +74,37 @@ const migrations: Migration[] = [
           node_id TEXT PRIMARY KEY,
           embedding BLOB NOT NULL,
           model TEXT NOT NULL,
-          dimension INTEGER NOT NULL DEFAULT 768,
           content_hash TEXT NOT NULL DEFAULT '',
           created_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model);
       `);
       try {
-        db.exec('ALTER TABLE vectors ADD COLUMN dimension INTEGER NOT NULL DEFAULT 768;');
-      } catch {
-        // Existing database already has the column.
-      }
-      try {
         db.exec("ALTER TABLE vectors ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';");
       } catch {
         // Existing database already has the column.
       }
+    },
+  },
+  {
+    version: 6,
+    description: 'Drop redundant vectors.dimension column and rebuild vectors table',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS vectors_new (
+          node_id TEXT PRIMARY KEY,
+          embedding BLOB NOT NULL,
+          model TEXT NOT NULL,
+          content_hash TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL
+        );
+        INSERT OR REPLACE INTO vectors_new (node_id, embedding, model, content_hash, created_at)
+        SELECT node_id, embedding, model, COALESCE(content_hash, ''), created_at
+        FROM vectors;
+        DROP TABLE vectors;
+        ALTER TABLE vectors_new RENAME TO vectors;
+        CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model);
+      `);
     },
   },
 ];

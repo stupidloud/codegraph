@@ -114,7 +114,6 @@ export function validateConfig(config: unknown): config is CodeGraphConfig {
     if (s.provider !== 'gemini' && s.provider !== 'jina') return false;
     if (s.apiKey !== undefined && typeof s.apiKey !== 'string') return false;
     if (s.model !== undefined && typeof s.model !== 'string') return false;
-    if (s.outputDimensionality !== undefined && typeof s.outputDimensionality !== 'number') return false;
     if (s.batchSize !== undefined && typeof s.batchSize !== 'number') return false;
     if (s.sqliteVssEnabled !== undefined && typeof s.sqliteVssEnabled !== 'boolean') return false;
     if (s.sqliteVssProbe !== undefined) {

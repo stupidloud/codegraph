@@ -498,8 +498,6 @@ export interface CodeGraphConfig {
     apiKey?: string;
     /** Embedding model */
     model?: string;
-    /** Requested embedding dimension */
-    outputDimensionality?: number;
     /** Number of node embeddings to generate per manager batch */
     batchSize?: number;
     /** Whether sqlite-vss passed the init-time child-process probe */
@@ -724,8 +722,7 @@ export const DEFAULT_CONFIG: CodeGraphConfig = {
   semanticSearch: {
     enabled: false,
     provider: 'gemini',
-    model: 'gemini-embedding-001',
-    outputDimensionality: 768,
+    model: 'gemini-embedding-2',
     batchSize: 32,
   },
 };

@@ -53,8 +53,7 @@ Gemini API key / Jina API key
     "enabled": true,
     "provider": "gemini",
     "apiKey": "YOUR_GEMINI_API_KEY",
-    "model": "gemini-embedding-001",
-    "outputDimensionality": 768,
+    "model": "gemini-embedding-2",
     "batchSize": 32
   }
 }
@@ -69,7 +68,6 @@ Jina 示例：
     "provider": "jina",
     "apiKey": "YOUR_JINA_API_KEY",
     "model": "jina-embeddings-v5-text-nano",
-    "outputDimensionality": 768,
     "batchSize": 32
   }
 }
@@ -150,7 +148,6 @@ const cg = await CodeGraph.init('/path/to/project', {
       provider: 'jina',
       apiKey: process.env.JINA_API_KEY,
       model: 'jina-embeddings-v5-text-nano',
-      outputDimensionality: 768,
       batchSize: 32,
     },
   },
@@ -184,8 +181,7 @@ cg.close();
   "semanticSearch": {
     "enabled": false,
     "provider": "gemini",
-    "model": "gemini-embedding-001",
-    "outputDimensionality": 768,
+    "model": "gemini-embedding-2",
     "batchSize": 32
   }
 }
@@ -202,8 +198,7 @@ cg.close();
 | `semanticSearch.enabled` | 是否启用远程 embedding 语义搜索 |
 | `semanticSearch.provider` | `gemini` 或 `jina` |
 | `semanticSearch.apiKey` | Provider API key |
-| `semanticSearch.model` | Gemini 默认 `gemini-embedding-001`；Jina 默认 `jina-embeddings-v5-text-nano` |
-| `semanticSearch.outputDimensionality` | 默认 `768` |
+| `semanticSearch.model` | Gemini 默认 `gemini-embedding-2`；Jina 默认 `jina-embeddings-v5-text-nano` |
 | `semanticSearch.batchSize` | 每批生成多少个节点 embedding |
 
 ## 支持语言

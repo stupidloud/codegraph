@@ -154,7 +154,6 @@ CREATE TABLE IF NOT EXISTS vectors (
     node_id TEXT PRIMARY KEY,
     embedding BLOB NOT NULL, -- Float32 array stored as blob
     model TEXT NOT NULL, -- Model used to generate embedding
-    dimension INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );

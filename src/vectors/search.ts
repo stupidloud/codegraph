@@ -134,7 +134,6 @@ export class VectorSearchManager {
         node_id TEXT PRIMARY KEY,
         embedding BLOB NOT NULL,
         model TEXT NOT NULL,
-        dimension INTEGER NOT NULL DEFAULT ${this.embeddingDimension},
         content_hash TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL
       );
@@ -144,11 +143,6 @@ export class VectorSearchManager {
     `);
     // Existing databases from the old semantic-search implementation only had
     // node_id, embedding, model, and created_at.
-    try {
-      this.db.exec(`ALTER TABLE vectors ADD COLUMN dimension INTEGER NOT NULL DEFAULT ${this.embeddingDimension};`);
-    } catch {
-      // Column already exists.
-    }
     try {
       this.db.exec(`ALTER TABLE vectors ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';`);
     } catch {
@@ -178,11 +172,11 @@ export class VectorSearchManager {
     this.db
       .prepare(
         `
-        INSERT OR REPLACE INTO vectors (node_id, embedding, model, dimension, content_hash, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO vectors (node_id, embedding, model, content_hash, created_at)
+        VALUES (?, ?, ?, ?, ?)
       `
       )
-      .run(nodeId, blob, model, embedding.length, contentHash, now);
+      .run(nodeId, blob, model, contentHash, now);
 
     // Also store in VSS table if enabled
     if (this.vssEnabled) {
@@ -248,11 +242,11 @@ export class VectorSearchManager {
         this.db
           .prepare(
             `
-            INSERT OR REPLACE INTO vectors (node_id, embedding, model, dimension, content_hash, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO vectors (node_id, embedding, model, content_hash, created_at)
+            VALUES (?, ?, ?, ?, ?)
           `
           )
-          .run(entry.nodeId, blob, model, entry.embedding.length, entry.contentHash ?? '', now);
+          .run(entry.nodeId, blob, model, entry.contentHash ?? '', now);
 
         if (this.vssEnabled) {
           this.storeInVss(entry.nodeId, entry.embedding);
@@ -424,14 +418,14 @@ export class VectorSearchManager {
   /**
    * Check if a node has a vector matching the current embedded text.
    */
-  hasCurrentVector(nodeId: string, model: string, dimension: number, contentHash: string): boolean {
+  hasCurrentVector(nodeId: string, model: string, contentHash: string): boolean {
     const result = this.db
       .prepare(`
         SELECT 1 FROM vectors
-        WHERE node_id = ? AND model = ? AND dimension = ? AND content_hash = ?
+        WHERE node_id = ? AND model = ? AND content_hash = ?
         LIMIT 1
       `)
-      .get(nodeId, model, dimension, contentHash);
+      .get(nodeId, model, contentHash);
     return !!result;
   }
 

@@ -190,7 +190,6 @@ export class CodeGraph {
         provider: semantic.provider,
         apiKey: semantic.apiKey,
         modelId: semantic.model,
-        outputDimensionality: semantic.outputDimensionality,
       },
       batchSize: semantic.batchSize,
       sqliteVssLoadablePaths: semantic.sqliteVssEnabled === true
@@ -1088,7 +1087,6 @@ export class CodeGraph {
     totalVectors: number;
     vssEnabled: boolean;
     modelId: string;
-    dimension: number;
   } | null {
     if (!this.vectorManager) {
       return null;

@@ -12,6 +12,7 @@ CodeGraph is a local-first code intelligence system that builds a semantic knowl
 - Per-project data stored in `.codegraph/` directory
 - Deterministic extraction from AST, not AI-generated summaries
 
+
 ## Build and Development Commands
 
 ```bash

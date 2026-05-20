@@ -6,7 +6,6 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { encode } from 'gpt-tokenizer';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -119,7 +118,6 @@ describe('Vector Embeddings', () => {
 
         const embedder = new TextEmbedder({
           apiKey: 'test-key',
-          outputDimensionality: 3,
         });
         await embedder.initialize();
 
@@ -134,8 +132,8 @@ describe('Vector Embeddings', () => {
         expect(url).toContain(':batchEmbedContents');
         const body = JSON.parse((fetchMock as any).mock.calls[0][1].body);
         expect(body.requests).toHaveLength(2);
-        expect(body.requests[0].model).toBe('models/gemini-embedding-001');
-        expect(body.requests[0].outputDimensionality).toBe(3);
+        expect(body.requests[0].model).toBe('models/gemini-embedding-2');
+        expect(body.requests[0].outputDimensionality).toBe(768);
         expect(body.requests[0].taskType).toBe('RETRIEVAL_DOCUMENT');
         expect(body.requests[0].content.parts).toHaveLength(1);
         expect(body.requests[0].content.parts[0].text).toBe('node one');
@@ -156,7 +154,6 @@ describe('Vector Embeddings', () => {
 
         const embedder = new TextEmbedder({
           apiKey: 'test-key',
-          outputDimensionality: 3,
         });
         await embedder.initialize();
 
@@ -165,72 +162,6 @@ describe('Vector Embeddings', () => {
         const body = JSON.parse((fetchMock as any).mock.calls[0][1].body);
         expect(body.requests).toHaveLength(1);
         expect(body.requests[0].taskType).toBe('CODE_RETRIEVAL_QUERY');
-      });
-
-      it('should truncate Gemini embedding-001 inputs to the token limit', async () => {
-        const fetchMock = vi.fn(async (_url, init) => {
-          const body = JSON.parse((init as RequestInit).body as string);
-          return {
-            ok: true,
-            json: async () => ({
-              embeddings: body.requests.map(() => ({ values: [0.1, 0.2, 0.3] })),
-            }),
-          };
-        }) as unknown as typeof fetch;
-        global.fetch = fetchMock;
-
-        const embedder = new TextEmbedder({
-          apiKey: 'test-key',
-          outputDimensionality: 3,
-        });
-        await embedder.initialize();
-
-        await embedder.embedBatch(['token '.repeat(3000)], 'document');
-
-        const body = JSON.parse((fetchMock as any).mock.calls[0][1].body);
-        const text = body.requests[0].content.parts[0].text;
-        expect(encode(text).length).toBeLessThanOrEqual(2048);
-        expect(encode(text).length).toBeGreaterThan(2000);
-      });
-
-      it('should throttle Gemini batch inputs as individual quota requests', async () => {
-        vi.useFakeTimers();
-        const fetchMock = vi.fn(async (_url, init) => {
-          const body = JSON.parse((init as RequestInit).body as string);
-          return {
-            ok: true,
-            json: async () => ({
-              embeddings: body.requests.map(() => ({ values: [0.1, 0.2, 0.3] })),
-            }),
-          };
-        }) as unknown as typeof fetch;
-        global.fetch = fetchMock;
-
-        try {
-          vi.setSystemTime(1_000);
-          const embedder = new TextEmbedder({
-            apiKey: 'test-key',
-            outputDimensionality: 3,
-          });
-          await embedder.initialize();
-
-          const batch = Array.from({ length: 32 }, (_, i) => `node ${i}`);
-          await embedder.embedBatch(batch, 'document');
-          await embedder.embedBatch(batch, 'document');
-          await embedder.embedBatch(batch, 'document');
-
-          const nextBatch = embedder.embedBatch(batch, 'document');
-          await Promise.resolve();
-
-          expect(fetchMock).toHaveBeenCalledTimes(3);
-          await vi.advanceTimersByTimeAsync(59_999);
-          expect(fetchMock).toHaveBeenCalledTimes(3);
-          await vi.advanceTimersByTimeAsync(1);
-          await nextBatch;
-          expect(fetchMock).toHaveBeenCalledTimes(4);
-        } finally {
-          vi.useRealTimers();
-        }
       });
 
       it('should retry retryable Gemini errors with exponential backoff', async () => {
@@ -254,7 +185,6 @@ describe('Vector Embeddings', () => {
         try {
           const embedder = new TextEmbedder({
             apiKey: 'test-key',
-            outputDimensionality: 3,
           });
           await embedder.initialize();
 
@@ -285,14 +215,54 @@ describe('Vector Embeddings', () => {
 
         const embedder = new TextEmbedder({
           apiKey: 'test-key',
-          outputDimensionality: 3,
         });
         await embedder.initialize();
 
         await expect(embedder.embedBatch(['node one'], 'document')).rejects.toThrow(
-          /Gemini embedding request failed \(400\): invalid request/
+          /Gemini embedding request failed \(400 Bad Request\): invalid request/
         );
         expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+
+      it('should include structured Gemini API error details in failure messages', async () => {
+        const fetchMock = vi.fn(async () => ({
+          ok: false,
+          status: 400,
+          statusText: 'Bad Request',
+          text: async () => JSON.stringify({
+            error: {
+              code: 400,
+              status: 'RESOURCE_EXHAUSTED',
+              details: [
+                {
+                  '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+                  violations: [
+                    {
+                      quotaMetric: 'generativelanguage.googleapis.com/embed_content_requests',
+                      quotaValue: '1000',
+                    },
+                  ],
+                },
+              ],
+            },
+          }),
+        })) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        const embedder = new TextEmbedder({
+          apiKey: 'test-key',
+        });
+        await embedder.initialize();
+
+        let errorMessage = '';
+        try {
+          await embedder.embedBatch(['node one'], 'document');
+        } catch (error) {
+          errorMessage = error instanceof Error ? error.message : String(error);
+        }
+
+        expect(errorMessage).toContain('RESOURCE_EXHAUSTED');
+        expect(errorMessage).toContain('quotaMetric');
       });
 
       it('should call Jina embeddings API for multiple input texts', async () => {
@@ -310,7 +280,6 @@ describe('Vector Embeddings', () => {
         const embedder = new TextEmbedder({
           provider: 'jina',
           apiKey: 'jina-test-key',
-          outputDimensionality: 3,
         });
         await embedder.initialize();
 
@@ -344,7 +313,6 @@ describe('Vector Embeddings', () => {
         const embedder = new TextEmbedder({
           provider: 'jina',
           apiKey: 'jina-test-key',
-          outputDimensionality: 3,
         });
         await embedder.initialize();
 
@@ -367,7 +335,6 @@ describe('Vector Embeddings', () => {
         const embedder = new TextEmbedder({
           provider: 'jina',
           apiKey: 'jina-test-key',
-          outputDimensionality: 3,
         });
         await embedder.initialize();
 
@@ -392,7 +359,6 @@ describe('Vector Embeddings', () => {
           const embedder = new TextEmbedder({
             provider: 'jina',
             apiKey: 'jina-test-key',
-            outputDimensionality: 3,
           });
           await embedder.initialize();
 
@@ -427,7 +393,6 @@ describe('Vector Embeddings', () => {
         const embedder = new TextEmbedder({
           provider: 'jina',
           apiKey: 'jina-test-key',
-          outputDimensionality: 3,
         });
         await embedder.initialize();
 
@@ -458,7 +423,6 @@ describe('Vector Embeddings', () => {
           const embedder = new TextEmbedder({
             provider: 'jina',
             apiKey: 'jina-test-key',
-            outputDimensionality: 3,
           });
           await embedder.initialize();
 
@@ -500,7 +464,6 @@ describe('Vector Embeddings', () => {
           provider: 'jina',
           apiKey: 'jina-test-key',
           model: 'jina-embeddings-v5-text-nano',
-          outputDimensionality: 768,
           batchSize: 32,
         },
       })).toBe(true);

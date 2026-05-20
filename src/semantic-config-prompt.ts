@@ -27,7 +27,7 @@ export async function promptSemanticSearchConfig(
   const provider = await clack.select({
     message: 'Embedding provider',
     options: [
-      { value: 'gemini', label: 'Gemini', hint: 'gemini-embedding-001, 768 dimensions' },
+      { value: 'gemini', label: 'Gemini', hint: 'gemini-embedding-2, 768 dimensions' },
       { value: 'jina', label: 'Jina', hint: 'jina-embeddings-v5-text-nano, 768 dimensions' },
     ],
     initialValue: 'gemini',
@@ -56,7 +56,7 @@ export async function promptSemanticSearchConfig(
     process.exit(0);
   }
 
-  const model = selectedProvider === 'jina' ? 'jina-embeddings-v5-text-nano' : 'gemini-embedding-001';
+  const model = selectedProvider === 'jina' ? 'jina-embeddings-v5-text-nano' : 'gemini-embedding-2';
   clack.log.info(`${providerName} semantic search will use ${model} with 768 dimensions.`);
 
   return {
@@ -65,7 +65,6 @@ export async function promptSemanticSearchConfig(
       provider: selectedProvider,
       apiKey: apiKey.trim(),
       model,
-      outputDimensionality: 768,
       batchSize: 32,
     },
   };

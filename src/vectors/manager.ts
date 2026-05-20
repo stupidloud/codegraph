@@ -132,17 +132,15 @@ export class VectorManager {
       nodesToEmbed.push(...nodes);
     }
 
-    // Remove vectors for nodes no longer present, then embed nodes whose text,
-    // model, or dimension changed.
+    // Remove vectors for nodes no longer present, then embed nodes whose text
+    // or model changed.
     this.searchManager.deleteStaleVectors();
     const model = this.embedder.getModelId();
-    const dimension = this.embedder.getDimension();
     const newNodes = nodesToEmbed.filter((node) => {
       const text = TextEmbedder.createNodeText(node);
       return !this.searchManager.hasCurrentVector(
         node.id,
         model,
-        dimension,
         this.hashText(text)
       );
     });
@@ -337,13 +335,11 @@ export class VectorManager {
     totalVectors: number;
     vssEnabled: boolean;
     modelId: string;
-    dimension: number;
   } {
     return {
       totalVectors: this.searchManager.getVectorCount(),
       vssEnabled: this.searchManager.isVssEnabled(),
       modelId: this.embedder.getModelId(),
-      dimension: this.embedder.getDimension(),
     };
   }
 

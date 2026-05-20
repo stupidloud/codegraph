@@ -1,6 +1,6 @@
 {
   "name": "@stupidloud/codegraph",
-  "version": "0.7.14",
+  "version": "0.7.15",
   "description": "Supercharge Claude Code with semantic code intelligence. 94% fewer tool calls • 77% faster exploration • 100% local.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -53,7 +53,7 @@
     "vitest": "^2.1.9"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^11.10.0",
     "sqlite-vss": "^0.1.2"
   },
   "engines": {
