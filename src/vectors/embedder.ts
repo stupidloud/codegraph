@@ -18,7 +18,7 @@ const GEMINI_EMBEDDING_ENDPOINT = 'https://generativelanguage.googleapis.com/v1b
 const JINA_EMBEDDING_ENDPOINT = 'https://api.jina.ai/v1/embeddings';
 const JINA_MAX_REQUESTS_PER_MINUTE = 100;
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const MAX_RETRY_ATTEMPTS = 3;
+const MAX_NETWORK_RETRY_ATTEMPTS = 3;
 const INITIAL_RETRY_DELAY_MS = 1_000;
 const RETRY_DELAY_MULTIPLIER = 2;
 const MAX_RETRY_DELAY_MS = 64_000;
@@ -323,10 +323,10 @@ export class TextEmbedder {
   private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
     let lastNetworkError: unknown;
 
-    for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+    for (let attempt = 0; ; attempt++) {
       try {
         const response = await fetch(url, init);
-        if (!this.isRetryableStatus(response.status) || attempt === MAX_RETRY_ATTEMPTS) {
+        if (!this.isRetryableStatus(response.status)) {
           return response;
         }
 
@@ -335,7 +335,7 @@ export class TextEmbedder {
         await this.sleep(retryDelayMs);
       } catch (error) {
         lastNetworkError = error;
-        if (attempt === MAX_RETRY_ATTEMPTS) {
+        if (attempt >= MAX_NETWORK_RETRY_ATTEMPTS) {
           break;
         }
 

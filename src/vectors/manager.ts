@@ -405,7 +405,7 @@ export class VectorManager {
       current,
       total,
       status: 'waiting',
-      detail: `${retryInSeconds}s (try ${status.attempt}/3)`,
+      detail: `${retryInSeconds}s (try ${status.attempt})`,
     });
   }
 }

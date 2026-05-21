@@ -44,7 +44,8 @@ export function createShimmerProgress(): ShimmerProgress {
       let detail: string | undefined;
       if (progress.phase === 'embedding_wait') {
         detail = progress.currentFile;
-      } else if (progress.total > 0) {
+      }
+      if (progress.total > 0) {
         percent = Math.round((progress.current / progress.total) * 100);
       } else if (progress.current > 0) {
         count = progress.current;
