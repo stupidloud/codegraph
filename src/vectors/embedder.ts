@@ -41,6 +41,13 @@ export interface EmbedderOptions {
   showProgress?: boolean;
 }
 
+export interface EmbedderStatusUpdate {
+  phase: 'retry_wait';
+  provider: 'Gemini' | 'Jina';
+  retryInMs: number;
+  attempt: number;
+}
+
 /**
  * Text embedding result
  */
@@ -94,6 +101,7 @@ export class TextEmbedder {
   private initialized = false;
   private requestTimestamps: Array<{ timestamp: number; cost: number }> = [];
   private rateLimitQueue: Promise<void> = Promise.resolve();
+  private statusReporter?: (status: EmbedderStatusUpdate) => void;
 
   constructor(options: EmbedderOptions = {}) {
     this.provider = options.provider || DEFAULT_PROVIDER;
@@ -135,6 +143,10 @@ export class TextEmbedder {
    */
   getDimension(): number {
     return EMBEDDING_DIMENSION;
+  }
+
+  setStatusReporter(reporter?: (status: EmbedderStatusUpdate) => void): void {
+    this.statusReporter = reporter;
   }
 
   /**
@@ -318,14 +330,18 @@ export class TextEmbedder {
           return response;
         }
 
-        await this.sleep(await this.getRetryDelayMs(attempt, response));
+        const retryDelayMs = await this.getRetryDelayMs(attempt, response);
+        this.reportRetryWait(retryDelayMs, attempt + 1);
+        await this.sleep(retryDelayMs);
       } catch (error) {
         lastNetworkError = error;
         if (attempt === MAX_RETRY_ATTEMPTS) {
           break;
         }
 
-        await this.sleep(await this.getRetryDelayMs(attempt));
+        const retryDelayMs = await this.getRetryDelayMs(attempt);
+        this.reportRetryWait(retryDelayMs, attempt + 1);
+        await this.sleep(retryDelayMs);
       }
     }
 
@@ -389,6 +405,15 @@ export class TextEmbedder {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  private reportRetryWait(retryInMs: number, attempt: number): void {
+    this.statusReporter?.({
+      phase: 'retry_wait',
+      provider: this.getProviderDisplayName(),
+      retryInMs,
+      attempt,
+    });
+  }
+
   private async throttleRequests(cost: number): Promise<void> {
     const reservation = this.rateLimitQueue.then(() => this.reserveRequestSlots(cost));
     this.rateLimitQueue = reservation.catch(() => undefined);
@@ -450,7 +475,7 @@ export class TextEmbedder {
     return provider === 'jina' ? DEFAULT_JINA_MODEL : DEFAULT_GEMINI_MODEL;
   }
 
-  private getProviderDisplayName(): string {
+  private getProviderDisplayName(): 'Gemini' | 'Jina' {
     return this.provider === 'jina' ? 'Jina' : 'Gemini';
   }
 

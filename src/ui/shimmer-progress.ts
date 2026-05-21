@@ -6,12 +6,15 @@ const PHASE_NAMES: Record<string, string> = {
   parsing: 'Parsing code',
   storing: 'Storing data',
   resolving: 'Resolving refs',
+  embedding: 'Generating embeddings',
+  embedding_wait: 'Waiting for quota',
 };
 
 export interface IndexProgress {
   phase: string;
   current: number;
   total: number;
+  currentFile?: string;
 }
 
 export interface ShimmerProgress {
@@ -38,7 +41,10 @@ export function createShimmerProgress(): ShimmerProgress {
 
       let percent = -1;
       let count = 0;
-      if (progress.total > 0) {
+      let detail: string | undefined;
+      if (progress.phase === 'embedding_wait') {
+        detail = progress.currentFile;
+      } else if (progress.total > 0) {
         percent = Math.round((progress.current / progress.total) * 100);
       } else if (progress.current > 0) {
         count = progress.current;
@@ -50,6 +56,7 @@ export function createShimmerProgress(): ShimmerProgress {
         phaseName,
         percent,
         count,
+        detail,
       });
     },
 

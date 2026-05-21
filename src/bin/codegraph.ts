@@ -198,6 +198,7 @@ function formatDuration(ms: number): string {
 function createVerboseProgress(): (progress: { phase: string; current: number; total: number; currentFile?: string }) => void {
   let lastPhase = '';
   let lastPct = -1;
+  let lastDetail = '';
   const startTime = Date.now();
 
   return (progress) => {
@@ -206,6 +207,7 @@ function createVerboseProgress(): (progress: { phase: string; current: number; t
     if (progress.phase !== lastPhase) {
       lastPhase = progress.phase;
       lastPct = -1;
+      lastDetail = '';
       console.log(`[${elapsed}s] Phase: ${progress.phase}`);
     }
 
@@ -215,6 +217,11 @@ function createVerboseProgress(): (progress: { phase: string; current: number; t
       if (pct >= lastPct + 5 || progress.current === progress.total) {
         lastPct = pct;
         console.log(`[${elapsed}s]   ${progress.current}/${progress.total} (${pct}%)${progress.currentFile ? ` ${getGlyphs().dash} ${progress.currentFile}` : ''}`);
+      }
+    } else if (progress.currentFile) {
+      if (progress.currentFile !== lastDetail) {
+        lastDetail = progress.currentFile;
+        console.log(`[${elapsed}s]   ${progress.currentFile}`);
       }
     } else if (progress.current > 0) {
       // Scanning phase (no total yet) — log periodically

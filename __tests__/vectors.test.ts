@@ -257,6 +257,64 @@ describe('Vector Embeddings', () => {
         }
       });
 
+      it('should report Gemini retry waits through the status reporter', async () => {
+        vi.useFakeTimers();
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValueOnce({
+            ok: false,
+            status: 429,
+            statusText: 'Too Many Requests',
+            clone() {
+              return {
+                text: async () => JSON.stringify({
+                  error: {
+                    details: [
+                      {
+                        '@type': 'type.googleapis.com/google.rpc.RetryInfo',
+                        retryDelay: '22s',
+                      },
+                    ],
+                  },
+                }),
+              };
+            },
+          })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              embeddings: [{ values: [0.1, 0.2, 0.3] }],
+            }),
+          }) as unknown as typeof fetch;
+        global.fetch = fetchMock;
+
+        try {
+          const statusUpdates: Array<{ provider: string; retryInMs: number; attempt: number }> = [];
+          const embedder = new TextEmbedder({
+            apiKey: 'test-key',
+          });
+          embedder.setStatusReporter((status) => {
+            statusUpdates.push({
+              provider: status.provider,
+              retryInMs: status.retryInMs,
+              attempt: status.attempt,
+            });
+          });
+          await embedder.initialize();
+
+          const resultPromise = embedder.embedBatch(['node one'], 'document');
+          await vi.advanceTimersByTimeAsync(22_000);
+          const result = await resultPromise;
+
+          expect(statusUpdates).toEqual([
+            { provider: 'Gemini', retryInMs: 22_000, attempt: 1 },
+          ]);
+          expect(result.embeddings[0]![0]).toBeCloseTo(0.1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('should not retry permanent Gemini errors', async () => {
         const fetchMock = vi.fn(async () => ({
           ok: false,

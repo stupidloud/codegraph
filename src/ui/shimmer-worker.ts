@@ -70,6 +70,7 @@ function renderBar(frame: number, filled: number, empty: number): string {
 let currentMessage = '';
 let currentPercent = -1;
 let currentCount = 0;
+let currentDetail = '';
 
 function render(): void {
   if (!currentMessage) return;
@@ -83,11 +84,11 @@ function render(): void {
     const barWidth = 25;
     const filled = Math.round(barWidth * currentPercent / 100);
     const empty = barWidth - filled;
-    line = `${DM}${G.rail}${RST}  ${color}${glyph}${RST} ${currentMessage}  ${renderBar(frame, filled, empty)}  ${currentPercent}%`;
+    line = `${DM}${G.rail}${RST}  ${color}${glyph}${RST} ${currentMessage}${currentDetail ? ` ${DM}${G.dash}${RST} ${currentDetail}` : ''}  ${renderBar(frame, filled, empty)}  ${currentPercent}%`;
   } else if (currentCount > 0) {
     line = `${DM}${G.rail}${RST}  ${color}${glyph}${RST} ${currentMessage}... ${formatNumber(currentCount)} found`;
   } else {
-    line = `${DM}${G.rail}${RST}  ${color}${glyph}${RST} ${currentMessage}...`;
+    line = `${DM}${G.rail}${RST}  ${color}${glyph}${RST} ${currentMessage}${currentDetail ? ` ${DM}${G.dash}${RST} ${currentDetail}` : '...'}`;
   }
 
   writeStdout(`\r\x1b[K${line}`);
@@ -103,6 +104,7 @@ function finishPhase(): void {
   currentMessage = '';
   currentPercent = -1;
   currentCount = 0;
+  currentDetail = '';
 }
 
 // Render loop — independent of main thread
@@ -113,6 +115,7 @@ parentPort!.on('message', (msg: ShimmerWorkerMessage) => {
     currentMessage = msg.phaseName;
     currentPercent = msg.percent;
     currentCount = msg.count;
+    currentDetail = msg.detail ?? '';
   } else if (msg.type === 'finish-phase') {
     finishPhase();
   } else if (msg.type === 'stop') {

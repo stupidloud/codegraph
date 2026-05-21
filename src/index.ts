@@ -565,11 +565,12 @@ export class CodeGraph {
       total,
     });
     await this.generateEmbeddings((progress) => {
+      const phase = progress.status === 'waiting' ? 'embedding_wait' : 'embedding';
       onProgress?.({
-        phase: 'embedding',
+        phase,
         current: progress.current,
         total: progress.total,
-        currentFile: progress.nodeName,
+        currentFile: progress.detail ?? progress.nodeName,
       });
     });
   }

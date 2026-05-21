@@ -1,6 +1,6 @@
 /** Messages from main thread to worker */
 export type ShimmerWorkerMessage =
-  | { type: 'update'; phase: string; phaseName: string; percent: number; count: number }
+  | { type: 'update'; phase: string; phaseName: string; percent: number; count: number; detail?: string }
   | { type: 'finish-phase' }
   | { type: 'stop' };
 

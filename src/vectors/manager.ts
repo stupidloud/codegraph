@@ -6,7 +6,7 @@
 
 import { SqliteDatabase } from '../db/sqlite-adapter';
 import { Node, SearchResult, SearchOptions } from '../types';
-import { TextEmbedder, createEmbedder, EmbedderOptions } from './embedder';
+import { TextEmbedder, createEmbedder, EmbedderOptions, EmbedderStatusUpdate } from './embedder';
 import { VectorSearchManager, createVectorSearch } from './search';
 import { SqliteVssLoadablePaths } from './sqlite-vss-probe';
 import { QueryBuilder } from '../db/queries';
@@ -24,6 +24,12 @@ export interface EmbeddingProgress {
 
   /** Current node being embedded */
   nodeName?: string;
+
+  /** Optional status for non-progress updates such as quota waits */
+  status?: 'embedding' | 'waiting';
+
+  /** Human-readable detail for the current status */
+  detail?: string;
 }
 
 /**
@@ -151,36 +157,45 @@ export class VectorManager {
 
     // Process in batches
     let processed = 0;
-    for (let i = 0; i < newNodes.length; i += this.batchSize) {
-      const batch = newNodes.slice(i, i + this.batchSize);
+    this.embedder.setStatusReporter((status) => {
+      this.reportEmbedderStatus(status, processed, newNodes.length, onProgress);
+    });
+    try {
+      for (let i = 0; i < newNodes.length; i += this.batchSize) {
+        const batch = newNodes.slice(i, i + this.batchSize);
 
-      // Create text representations
-      const texts = batch.map((node) => TextEmbedder.createNodeText(node));
+        // Create text representations
+        const texts = batch.map((node) => TextEmbedder.createNodeText(node));
 
-      // Generate embeddings
-      const result = await this.embedder.embedBatch(texts, 'document');
+        // Generate embeddings
+        const result = await this.embedder.embedBatch(texts, 'document');
 
-      // Store embeddings
-      const entries: Array<{ nodeId: string; embedding: Float32Array; contentHash: string }> = [];
-      for (let idx = 0; idx < batch.length; idx++) {
-        const node = batch[idx];
-        const embedding = result.embeddings[idx];
-        if (node && embedding) {
-          entries.push({ nodeId: node.id, embedding, contentHash: this.hashText(texts[idx]!) });
+        // Store embeddings
+        const entries: Array<{ nodeId: string; embedding: Float32Array; contentHash: string }> = [];
+        for (let idx = 0; idx < batch.length; idx++) {
+          const node = batch[idx];
+          const embedding = result.embeddings[idx];
+          if (node && embedding) {
+            entries.push({ nodeId: node.id, embedding, contentHash: this.hashText(texts[idx]!) });
+          }
+        }
+
+        this.searchManager.storeVectorBatch(entries, model);
+
+        processed += batch.length;
+
+        // Report progress
+        if (onProgress) {
+          onProgress({
+            current: processed,
+            total: newNodes.length,
+            nodeName: batch[batch.length - 1]?.name,
+            status: 'embedding',
+          });
         }
       }
-      this.searchManager.storeVectorBatch(entries, model);
-
-      processed += batch.length;
-
-      // Report progress
-      if (onProgress) {
-        onProgress({
-          current: processed,
-          total: newNodes.length,
-          nodeName: batch[batch.length - 1]?.name,
-        });
-      }
+    } finally {
+      this.embedder.setStatusReporter(undefined);
     }
 
     return processed;
@@ -373,6 +388,25 @@ export class VectorManager {
 
   private hashText(text: string): string {
     return crypto.createHash('sha256').update(text).digest('hex');
+  }
+
+  private reportEmbedderStatus(
+    status: EmbedderStatusUpdate,
+    current: number,
+    total: number,
+    onProgress?: (progress: EmbeddingProgress) => void
+  ): void {
+    if (!onProgress || status.phase !== 'retry_wait') {
+      return;
+    }
+
+    const retryInSeconds = Math.max(1, Math.ceil(status.retryInMs / 1000));
+    onProgress({
+      current,
+      total,
+      status: 'waiting',
+      detail: `${retryInSeconds}s (try ${status.attempt}/3)`,
+    });
   }
 }
 

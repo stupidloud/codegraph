@@ -15,6 +15,7 @@ export {
   EmbedderOptions,
   EmbeddingResult,
   BatchEmbeddingResult,
+  EmbedderStatusUpdate,
 } from './embedder';
 
 export {
