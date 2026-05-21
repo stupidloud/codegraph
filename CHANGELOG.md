@@ -7,9 +7,20 @@ a [GitHub Release](https://github.com/colbymchenry/codegraph/releases) tagged
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.12] - 2026-05-20
+## [0.8.0] - 2026-05-20
 
 ### Added
+- **Framework routes (NestJS)**: CodeGraph now recognises NestJS projects and
+  emits `route` nodes — each linked by a `references` edge to its handler
+  method — across all four transport layers: HTTP controllers (the
+  `@Controller` prefix joined with `@Get`/`@Post`/`@Put`/`@Patch`/`@Delete`/
+  `@Head`/`@Options`/`@All`, including empty `@Controller()`/`@Get()`),
+  GraphQL resolvers (`@Query`/`@Mutation`/`@Subscription`), microservice
+  handlers (`@MessagePattern`/`@EventPattern`), and WebSocket gateways
+  (`@SubscribeMessage`, prefixed with the gateway namespace). Detected
+  automatically from any `@nestjs/*` dependency in `package.json`. Querying a
+  controller method or resolver now surfaces the route that binds it.
+  Resolves [#220](https://github.com/colbymchenry/codegraph/issues/220).
 - **MCP / explore**: `codegraph_explore` source sections now carry line
   numbers (cat -n style `<num>\t<code>`, matching the Read tool). This lets
   the agent cite `file:line` straight from the explore payload instead of
@@ -20,8 +31,44 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the line number while the line-numbered arm answered with zero follow-up
   tool calls. Payload cost is small (~3-5%). Set
   `CODEGRAPH_EXPLORE_LINENUMS=0` to disable.
+- **MCP / watcher**: CodeGraph now skips the live file watcher on WSL2
+  `/mnt/*` drives, where recursive `fs.watch` is slow enough to break MCP
+  startup (see Fixed). When the watcher is off, `codegraph init` /
+  `codegraph install` offer to keep the index fresh via git hooks
+  (`post-commit`, `post-merge`, `post-checkout`) that run `codegraph sync`
+  in the background — accept for automatic refresh on commit / pull /
+  checkout, or decline and sync by hand. Either way you're told the index
+  stays frozen until it's re-synced. New controls: `CODEGRAPH_NO_WATCH=1`
+  (or `codegraph serve --mcp --no-watch`) forces the watcher off anywhere;
+  `CODEGRAPH_FORCE_WATCH=1` overrides the WSL auto-detect when your `/mnt`
+  setup is actually fast. `codegraph uninit` removes any hooks it installed.
 
 ### Changed
+- **MCP / agent guidance**: CodeGraph now tells agents to answer "how does X
+  work" / architecture questions *directly* — `codegraph_context`, then one
+  `codegraph_explore` for the surfaced symbols — instead of delegating to a
+  file-reading sub-agent or a grep+read loop. The server instructions and the
+  installed instruction files (`CLAUDE.md`, `.cursor/rules/codegraph.mdc`,
+  `AGENTS.md`) previously suggested *spawning a sub-agent* for explore-class
+  questions, which produced the opposite, more expensive behavior: the
+  sub-agent reads files regardless of the index, so CodeGraph became overhead
+  stacked on top of the reads. In rigorous N≥4-per-arm benchmarks this cut the
+  cost of an architecture question by ~42–47% versus a no-CodeGraph agent on
+  medium and large repos (Excalidraw ~600 files, VS Code ~10k), with
+  equal-or-better, `file:line`-cited answers and ~6× fewer tool calls; on a
+  tiny repo (~25 files) it's a wash, since native grep is already trivially
+  cheap there.
+- **MCP / codegraph_node**: `includeCode=true` on a class/interface/struct/enum
+  now returns a compact member outline (fields + method signatures + line
+  numbers) instead of the entire class body — which could be thousands of
+  characters and was rarely needed in full. Functions and methods still return
+  their full body; request a specific member for its source.
+- **Minimum Node.js is now 20** (was 18). Node 18 is end-of-life and the
+  native SQLite binding (`better-sqlite3` 12.x) no longer ships a Node 18
+  prebuilt binary. Node 22 LTS and Node 24 get the native backend out of the
+  box; on other Node versions CodeGraph still runs via the WASM fallback
+  (slower, but functional). Node 25+ remains blocked (V8 WASM JIT crash, see
+  [#81](https://github.com/colbymchenry/codegraph/issues/81)).
 - **MCP / explore**: `codegraph_explore` output is now adaptive to project
   size. The tool used to apply a fixed 35KB cap regardless of how large the
   codebase was, which on small projects (~100 files) produced bigger
@@ -31,7 +78,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now scales with indexed file count: small projects (<500 files) cap at
   ~18KB and skip the "Additional relevant files" / completeness / explore-
   budget reminders that earn their keep on bigger codebases; medium
-  (<5,000) caps at ~28KB; large (<15,000) keeps the historical ~35KB; very
+  (<5,000) caps at ~13KB; large (<15,000) keeps the historical ~35KB; very
   large goes up to ~38KB. A new per-file char cap also prevents a single
   file with many adjacent symbols from collapsing into one whole-file dump
   (the Alamofire `Session.swift` case from #185). Per-file cluster
@@ -55,8 +102,103 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   general-purpose agent that led with explore (13 calls, ~55k tokens) for the
   same VS Code question. Updated in lockstep across `server-instructions.ts`,
   `instructions-template.ts`, and `.cursor/rules/codegraph.mdc`.
+- **Search ranking (Kotlin / Swift / Scala / C#)**: test files in these
+  languages are now correctly de-prioritized in `codegraph_search`,
+  `codegraph_context`, and `codegraph affected`. Detection previously only
+  recognized `snake_case`/`.test.`-style names plus a handful of Java
+  suffixes, so CamelCase test files (`FooTest.kt`, `BarTests.swift`,
+  `BazSpec.scala`, `QuxTestCase.cs`) and Gradle / Kotlin-Multiplatform /
+  Xcode test source-set directories (`jvmTest/`, `commonTest/`,
+  `androidTest/`, `iosTest/`, `integrationTest/`) were treated as production
+  code and could outrank the real implementation. Detection now matches
+  capital-led `*Test` / `*Tests` / `*Spec` / `*TestCase` filenames and
+  source-set directories — deliberately capital-led so lowercase look-alikes
+  like `latest.kt` and `manifest.kt` are not misclassified.
 
 ### Fixed
+- **MCP / explore**: `codegraph_explore` output is now hard-capped to its
+  adaptive size budget. It could previously overrun (e.g. ~30K against a 28K
+  cap) once the relationship map and trailer sections were appended; the
+  oversized payload then sat in the agent's context and was re-read on every
+  later turn.
+- **Sync / status**: git-untracked files are no longer reported as pending
+  "Added" forever. After `codegraph sync` indexed a newly-created untracked
+  source file, `codegraph status` kept listing it under Pending Changes and
+  every subsequent `sync` re-indexed it from scratch — even though its symbols
+  were already queryable. Change detection trusted `git status` and counted
+  every untracked (`??`) entry as new without checking the index, but indexing
+  a file doesn't make git track it, so the file stayed `??` and got re-added on
+  each run. CodeGraph now hash-compares untracked files against the index the
+  same way it does tracked files: a file counts as "added" only if it's missing
+  from the index, "modified" if its contents changed, and is skipped otherwise.
+  Closes [#206](https://github.com/colbymchenry/codegraph/issues/206). Thanks to
+  [@15290391025](https://github.com/15290391025) for the report.
+- **Indexing**: `codegraph init -i` now finds source inside nested, independent
+  git repositories — separate clones living inside the workspace that are **not**
+  git submodules (common in CMake "super-repo" layouts). When the top-level
+  workspace is itself a git repo, `git ls-files` reports an embedded repo only as
+  an opaque `subdir/` entry and never lists its files, so indexing from the
+  workspace root reported "No files found to index" even though indexing each
+  sub-repo individually worked. CodeGraph now detects these embedded repos and
+  indexes their tracked and untracked source, honoring each repo's own
+  `.gitignore`. Closes
+  [#193](https://github.com/colbymchenry/codegraph/issues/193). Thanks to
+  [@timxx](https://github.com/timxx) for the report.
+- **Native SQLite backend on Node 24**: indexing on Node 24 always dropped to
+  the 5-10x-slower WASM backend, printing a `better-sqlite3 unavailable`
+  warning that `npm rebuild better-sqlite3` / `xcode-select --install` could
+  not clear ([#203](https://github.com/colbymchenry/codegraph/issues/203)).
+  The bundled `better-sqlite3` was pinned to a v11 release that ships no
+  prebuilt binary for Node 24's ABI (`node-v137`), so every Node 24 install
+  silently degraded — and because CodeGraph is usually installed globally, the
+  `npm install` / `npm rebuild` people ran in their own project never touched
+  CodeGraph's copy. CodeGraph now requires `better-sqlite3` `^12.4.1`, whose
+  prebuilds include Node 24, so a fresh install on Node 22 or Node 24 gets the
+  native backend with no compiler. On an already-broken install, reinstall
+  CodeGraph (e.g. `npm install -g @colbymchenry/codegraph`) to pull the new
+  binding; `codegraph status` should then report `Backend: native`. Thanks to
+  [@Finndersen](https://github.com/Finndersen) for the report.
+- **MCP**: tools no longer fail with "CodeGraph not initialized" when the index
+  actually exists. This hit clients that launch the MCP server from a directory
+  other than your project and don't report a workspace root in `initialize`
+  (some IDE/JetBrains-family integrations) — the server fell back to its own
+  working directory, missed the project's `.codegraph/`, and returned the
+  misleading "Run 'codegraph init' first" on every call. The only workaround
+  was passing `projectPath` to each tool by hand. Now, when no project path is
+  supplied, the server asks the client for its workspace root via the standard
+  MCP `roots/list` request (when the client advertises the `roots` capability)
+  before falling back to the working directory — so detection just works for
+  spec-compliant clients. When it still can't resolve a project, the error is
+  now actionable: it names the directory it searched and tells you to pass
+  `projectPath` or add `--path /abs/project` to the server's MCP config args,
+  instead of pointing you at a re-init you don't need. Closes
+  [#196](https://github.com/colbymchenry/codegraph/issues/196). Thanks to
+  [@zhangyu1197](https://github.com/zhangyu1197) for the report and the
+  `projectPath` workaround.
+- **MCP**: the server no longer hangs on startup under WSL2 when the project
+  lives on an NTFS `/mnt/*` mount. Setting up the recursive file watcher
+  there took tens of seconds — every directory read crosses the Windows/9p
+  boundary — which blew past the host's initialization timeout (opencode's
+  30s), so the codegraph tools silently never appeared, even on small
+  projects. This is the file-watcher half of the
+  [#172](https://github.com/colbymchenry/codegraph/issues/172) startup fix:
+  that one moved the database/WASM open off the handshake, but the watcher
+  setup was still on the critical path. CodeGraph now auto-skips the watcher
+  on those mounts, with manual and git-hook sync fallbacks (see Added).
+  Closes [#199](https://github.com/colbymchenry/codegraph/issues/199).
+  Thanks to [@mengfanbo123](https://github.com/mengfanbo123) for the precise
+  root-cause analysis and workaround.
+- **Installer (Claude Code)**: project-local installs (`Just this project`)
+  now write the MCP server to `.mcp.json` in the project root — the file
+  Claude Code actually reads for project-scoped servers. Previously they
+  wrote `.claude.json`, which Claude Code ignores, so the codegraph tools
+  silently never appeared and you had to rename the file by hand to make it
+  work. Re-running `codegraph install` (or `codegraph init`) on an affected
+  project migrates the stale `.claude.json` entry into `.mcp.json`
+  automatically; uninstall cleans up both. Global (`All projects`) installs
+  were unaffected — they correctly target `~/.claude.json`. Closes
+  [#207](https://github.com/colbymchenry/codegraph/issues/207). Thanks to
+  [@Jhsmit](https://github.com/Jhsmit) for the report and the workaround.
 - **MCP**: source-omission markers in `codegraph_explore` and
   `codegraph_context` output are now language-neutral (`... (gap) ...`,
   `... (trimmed) ...`, `... (truncated) ...`) instead of C-style `//`
@@ -127,6 +269,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       returns `null` instead of resolving to an unrelated `rollback`
       in the same file.
 
+[0.8.0]: https://github.com/colbymchenry/codegraph/releases/tag/v0.8.0
 [0.7.10]: https://github.com/colbymchenry/codegraph/releases/tag/v0.7.10
 
 ## [0.7.8] - 2026-05-17

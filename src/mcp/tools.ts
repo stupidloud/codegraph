@@ -25,6 +25,16 @@ const MAX_OUTPUT_LENGTH = 15000;
  */
 const RUST_PATH_PREFIXES = new Set(['crate', 'super', 'self']);
 
+/**
+ * Node kinds that contain other symbols. For these, `codegraph_node` with
+ * `includeCode=true` returns a structural outline (member names + signatures
+ * + line numbers) instead of the full body, which for a large class is a
+ * multi-thousand-character wall of source that bloats the agent's context.
+ */
+const CONTAINER_NODE_KINDS = new Set<NodeKind>([
+  'class', 'struct', 'interface', 'trait', 'protocol', 'enum', 'namespace', 'module',
+]);
+
 /** Last `::` / `.` / `/`-separated segment of a qualified symbol. */
 function lastQualifierPart(symbol: string): string {
   const parts = symbol.split(/::|[./]/).filter((p) => p.length > 0);
@@ -102,12 +112,12 @@ export function getExploreOutputBudget(fileCount: number): ExploreOutputBudget {
   }
   if (fileCount < 5000) {
     return {
-      maxOutputChars: 28000,
-      defaultMaxFiles: 9,
-      maxCharsPerFile: 5000,
-      gapThreshold: 12,
-      maxSymbolsInFileHeader: 10,
-      maxEdgesPerRelationshipKind: 10,
+      maxOutputChars: 13000,
+      defaultMaxFiles: 6,
+      maxCharsPerFile: 2500,
+      gapThreshold: 10,
+      maxSymbolsInFileHeader: 8,
+      maxEdgesPerRelationshipKind: 8,
       includeRelationships: true,
       includeAdditionalFiles: true,
       includeCompletenessSignal: true,
@@ -263,7 +273,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_context',
-    description: 'PRIMARY TOOL: Build comprehensive context for a task. Returns entry points, related symbols, and key code - often enough to understand the codebase without additional tool calls. NOTE: This provides CODE context, not product requirements. For new features, still clarify UX/behavior questions with the user before implementing.',
+    description: 'PRIMARY TOOL — call this FIRST for any "how does X work", architecture, feature, or bug-context question. Composes search + node + callers + callees and returns entry points, related symbols, and key code in ONE call — usually enough to answer with no further search/Read/Grep. Prefer this over chaining codegraph_search + codegraph_node, and over codegraph_explore. NOTE: provides CODE context, not product requirements; for new features still clarify UX/edge cases with the user.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -348,7 +358,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_node',
-    description: 'Get detailed information about a specific code symbol. Use includeCode=true only when you need the full source code - otherwise just get location and signature to minimize context usage.',
+    description: 'Get detailed info about ONE symbol (location, signature, docstring). Pass includeCode=true for source: a function/method returns its body; a class/interface/struct/enum returns a compact member OUTLINE (fields + method signatures + line numbers), not every method body — Read or codegraph_node a specific member for its body. Keep includeCode=false to minimize context. For SEVERAL related symbols, make ONE codegraph_explore (or codegraph_context) call instead of many node calls — repeated node calls each re-read the whole context and cost far more.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -368,7 +378,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'codegraph_explore',
-    description: 'PRIMARY TOOL for understanding questions — "how does X work", "trace X end to end", "explain the Y system", architecture/onboarding. Returns comprehensive context in a SINGLE call: relevant source grouped by file (contiguous, line-numbered sections, not snippets) + a relationship map + deep graph traversal. It REPLACES the grep+Read exploration loop: feed it the key symbol/file names and read its output — do NOT Read the files one by one. It works best when your query names the relevant symbols (e.g. "readAgentsFromDirectory createClaudeSession chat-manager agents.ts"); if the question is a plain sentence that names nothing concrete, do ONE quick codegraph_search or codegraph_context to surface the names, then call this with them. After exploring, use codegraph_node / Read only to fill specific gaps it did not cover. Prefer codegraph_search over this only for a pinpoint "where is X defined" lookup.',
+    description: 'PRIMARY TOOL for understanding questions and inspecting SEVERAL related symbols in ONE capped call. Returns relevant source grouped by file (contiguous, line-numbered sections) plus a relationship map. Use it after codegraph_context when you need actual source for the surfaced symbols, or query it directly with specific symbol/file/code terms. Strongly prefer it over many codegraph_node or Read calls. For a pinpoint "where is X defined" lookup, use codegraph_search instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -440,6 +450,9 @@ export const tools: ToolDefinition[] = [
 export class ToolHandler {
   // Cache of opened CodeGraph instances for cross-project queries
   private projectCache: Map<string, CodeGraph> = new Map();
+  // The directory the server last searched for a default project. Surfaced in
+  // the "not initialized" error so users can see why detection missed.
+  private defaultProjectHint: string | null = null;
 
   constructor(private cg: CodeGraph | null) {}
 
@@ -448,6 +461,14 @@ export class ToolHandler {
    */
   setDefaultCodeGraph(cg: CodeGraph): void {
     this.cg = cg;
+  }
+
+  /**
+   * Record the directory the server tried to resolve the default project from.
+   * Used only to make the "no default project" error actionable.
+   */
+  setDefaultProjectHint(searchedPath: string): void {
+    this.defaultProjectHint = searchedPath;
   }
 
   /**
@@ -495,7 +516,16 @@ export class ToolHandler {
   private getCodeGraph(projectPath?: string): CodeGraph {
     if (!projectPath) {
       if (!this.cg) {
-        throw new Error('CodeGraph not initialized for this project. Run \'codegraph init\' first.');
+        const searched = this.defaultProjectHint ?? process.cwd();
+        throw new Error(
+          'No CodeGraph project is loaded for this session.\n' +
+          `Searched for a .codegraph/ directory starting from: ${searched}\n` +
+          'The index is likely fine — this is a working-directory detection issue: ' +
+          "the MCP client launched the server outside your project and didn't report the " +
+          'workspace root. Fix it either way:\n' +
+          '  • Pass projectPath to the tool call, e.g. projectPath: "/absolute/path/to/your/project"\n' +
+          '  • Or add --path to the server\'s MCP config args: ["serve", "--mcp", "--path", "/absolute/path/to/your/project"]'
+        );
       }
       return this.cg;
     }
@@ -1221,7 +1251,20 @@ export class ToolHandler {
       }
     }
 
-    return this.textResult(lines.join('\n'));
+    // Hard-cap to the adaptive budget. The per-file loop bounds the source
+    // sections, but the relationship map, additional-files list, and
+    // completeness/budget notes can still push the assembled output past
+    // maxOutputChars (observed 30k against a 28k tier cap). A fat explore
+    // payload persists in the agent's context and is re-read as cache-input
+    // on every subsequent turn, so the overrun is paid many times over.
+    const output = lines.join('\n');
+    if (output.length > budget.maxOutputChars) {
+      const cut = output.slice(0, budget.maxOutputChars);
+      const lastNewline = cut.lastIndexOf('\n');
+      const safe = lastNewline > budget.maxOutputChars * 0.8 ? cut.slice(0, lastNewline) : cut;
+      return this.textResult(safe + '\n\n... (explore output truncated to budget — use codegraph_node or Read for more)');
+    }
+    return this.textResult(output);
   }
 
   /**
@@ -1241,12 +1284,24 @@ export class ToolHandler {
     }
 
     let code: string | null = null;
+    let outline: string | null = null;
 
     if (includeCode) {
-      code = await cg.getCode(match.node.id);
+      // For container symbols (class/interface/struct/…), the full body is the
+      // sum of every method body — a wall of source (e.g. a 10k-char class)
+      // that bloats context and is rarely needed in full. Return a structural
+      // outline (members + signatures + line numbers) instead; the agent can
+      // Read or codegraph_node a specific method for its body. Leaf symbols
+      // (function/method/etc.) return their full body as before.
+      if (CONTAINER_NODE_KINDS.has(match.node.kind)) {
+        outline = this.buildContainerOutline(cg, match.node);
+      }
+      if (!outline) {
+        code = await cg.getCode(match.node.id);
+      }
     }
 
-    const formatted = this.formatNodeDetails(match.node, code) + match.note;
+    const formatted = this.formatNodeDetails(match.node, code, outline) + match.note;
     return this.textResult(this.truncateOutput(formatted));
   }
 
@@ -1696,7 +1751,29 @@ export class ToolHandler {
     return lines.join('\n');
   }
 
-  private formatNodeDetails(node: Node, code: string | null): string {
+  /**
+   * Build a compact structural outline of a container symbol from its
+   * indexed children (methods, fields, properties, …) — name, kind,
+   * line number, and signature — so the agent gets the shape of a class
+   * without the full source of every method. Returns '' when the container
+   * has no indexed children, so the caller can fall back to full source.
+   */
+  private buildContainerOutline(cg: CodeGraph, node: Node): string {
+    const children = cg.getChildren(node.id)
+      .filter(c => c.kind !== 'import' && c.kind !== 'export')
+      .sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0));
+    if (children.length === 0) return '';
+
+    const lines = [`**Members (${children.length}):**`, ''];
+    for (const c of children) {
+      const loc = c.startLine ? `:${c.startLine}` : '';
+      const sig = c.signature ? ` — \`${c.signature}\`` : '';
+      lines.push(`- ${c.name} (${c.kind})${loc}${sig}`);
+    }
+    return lines.join('\n');
+  }
+
+  private formatNodeDetails(node: Node, code: string | null, outline?: string | null): string {
     const location = node.startLine ? `:${node.startLine}` : '';
     const lines: string[] = [
       `## ${node.name} (${node.kind})`,
@@ -1713,7 +1790,10 @@ export class ToolHandler {
       lines.push('', node.docstring);
     }
 
-    if (code) {
+    if (outline) {
+      lines.push('', outline, '',
+        `> Structural outline only. Read \`${node.filePath}\` or call codegraph_node on a specific member for its body.`);
+    } else if (code) {
       lines.push('', '```' + node.language, code, '```');
     }
 

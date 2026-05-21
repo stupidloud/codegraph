@@ -24,7 +24,7 @@ tmux kill-session -t "$SESSION" 2>/dev/null
 
 # Wide pane so the TUI doesn't hard-wrap tool lines.
 tmux new-session -d -s "$SESSION" -x 230 -y 60
-tmux send-keys -t "$SESSION" "cd $REPO && claude --dangerously-skip-permissions" Enter
+tmux send-keys -t "$SESSION" "cd $REPO && claude --dangerously-skip-permissions ${CLAUDE_EXTRA_ARGS:-}" Enter
 
 # Wait for the ❯ prompt (claude drew its UI), up to 60s. NOTE: ❯ appears on the
 # welcome screen seconds before the input actually accepts keystrokes, so this is
