@@ -85,6 +85,10 @@ export const LANGUAGES = [
   'liquid',
   'pascal',
   'scala',
+  'lua',
+  'luau',
+  'yaml',
+  'twig',
   'unknown',
 ] as const;
 
@@ -422,7 +426,6 @@ export interface CodeBlock {
   node?: Node;
 }
 
-// =============================================================================
 // Configuration Types
 // =============================================================================
 
@@ -571,6 +574,13 @@ export const DEFAULT_CONFIG: CodeGraphConfig = {
     // Scala
     '**/*.scala',
     '**/*.sc',
+    // Lua / Luau
+    '**/*.lua',
+    '**/*.luau',
+    // Drupal config/templates
+    '**/*.yml',
+    '**/*.yaml',
+    '**/*.twig',
   ],
   exclude: [
     // Version control

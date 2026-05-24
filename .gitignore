@@ -43,6 +43,9 @@ config.json
 .key
 scratch/
 
+# Parallels Windows VM SSH/connection config (local machine, see CLAUDE.md)
+.parallels
+
 # CodeGraph data directories (in test projects)
 .codegraph/
 
@@ -52,3 +55,4 @@ test_frameworks
 test-languages/
 
 nul
+release/

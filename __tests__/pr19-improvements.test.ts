@@ -45,11 +45,11 @@ function cleanupTempDir(dir: string): void {
   }
 }
 
-// Check if better-sqlite3 native bindings are available
+// Check if the node:sqlite backend is available (Node >= 22.5)
 function hasSqliteBindings(): boolean {
   try {
-    const Database = require('better-sqlite3');
-    const db = new Database(':memory:');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(':memory:');
     db.close();
     return true;
   } catch {
@@ -299,7 +299,7 @@ describe('Best-Candidate Resolution', () => {
 describe('Schema v2 Migration', () => {
   it.skipIf(!HAS_SQLITE)('should have correct current schema version', async () => {
     const { CURRENT_SCHEMA_VERSION } = await import('../src/db/migrations');
-    expect(CURRENT_SCHEMA_VERSION).toBe(5);
+    expect(CURRENT_SCHEMA_VERSION).toBe(6);
   });
 
   it.skipIf(!HAS_SQLITE)('should have migration for version 2', async () => {
