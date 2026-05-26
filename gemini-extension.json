@@ -1,0 +1,36 @@
+{
+  "name": "@stupidloud/codegraph",
+  "version": "0.9.6",
+  "description": "Supercharge your agent with semantic code intelligence. 94% fewer tool calls • 77% faster exploration • 100% local.",
+  "settings": [
+    {
+      "name": "No Watch",
+      "description": "Disable file watcher (set to '1' to disable, useful for slow filesystems like WSL2 /mnt)",
+      "envVar": "CODEGRAPH_NO_WATCH"
+    }
+  ],
+  "mcpServers": {
+    "codegraph": {
+      "command": "node",
+      "args": ["${extensionPath}/dist/bin/codegraph.js", "serve", "--mcp"],
+      "cwd": "${extensionPath}"
+    }
+  },
+  "contextFileName": "GEMINI.md",
+  "commands": {
+    "cg": {
+      "init": {
+        "description": "Initialize CodeGraph in the current project",
+        "shell": "node ${extensionPath}/dist/bin/codegraph.js init --index"
+      },
+      "status": {
+        "description": "Show CodeGraph index status",
+        "shell": "node ${extensionPath}/dist/bin/codegraph.js status"
+      },
+      "ui": {
+        "description": "Open CodeGraph interactive visualization",
+        "shell": "node ${extensionPath}/dist/bin/codegraph.js visualize"
+      }
+    }
+  }
+}
