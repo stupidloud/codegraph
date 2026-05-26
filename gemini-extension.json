@@ -11,8 +11,8 @@
   ],
   "mcpServers": {
     "codegraph": {
-      "command": "node",
-      "args": ["${extensionPath}/dist/bin/codegraph.js", "serve", "--mcp"],
+      "command": "npx",
+      "args": ["codegraph", "serve", "--mcp"],
       "cwd": "${extensionPath}"
     }
   },
@@ -21,15 +21,15 @@
     "cg": {
       "init": {
         "description": "Initialize CodeGraph in the current project",
-        "shell": "node ${extensionPath}/dist/bin/codegraph.js init --index"
+        "shell": "npx codegraph init --index"
       },
       "status": {
         "description": "Show CodeGraph index status",
-        "shell": "node ${extensionPath}/dist/bin/codegraph.js status"
+        "shell": "npx codegraph status"
       },
       "ui": {
         "description": "Open CodeGraph interactive visualization",
-        "shell": "node ${extensionPath}/dist/bin/codegraph.js visualize"
+        "shell": "npx codegraph visualize"
       }
     }
   }
