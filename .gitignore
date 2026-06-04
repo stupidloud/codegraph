@@ -42,6 +42,7 @@ npm-debug.log*
 config.json
 .key
 scratch/
+.claude/scheduled_tasks.lock
 
 # Parallels Windows VM SSH/connection config (local machine, see CLAUDE.md)
 .parallels
@@ -56,3 +57,8 @@ test-languages/
 
 nul
 release/
+
+.antigravitycli/
+
+# Local-only: browser-based tmux session launcher (see tmux-web/README.md)
+tmux-web/
