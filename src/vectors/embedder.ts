@@ -489,6 +489,7 @@ export class TextEmbedder {
     signature?: string;
     docstring?: string;
     filePath: string;
+    body?: string;
   }): string {
     const parts: string[] = [];
 
@@ -506,6 +507,14 @@ export class TextEmbedder {
 
     if (node.docstring) {
       parts.push(`documentation: ${node.docstring}`);
+    }
+
+    // Body last: gemini-embedding-2 silently truncates beyond 8192 tokens, so
+    // putting body at the tail means an overflow loses code-tail, not
+    // signature or docstring — the bits that carry the most retrieval signal
+    // per token.
+    if (node.body) {
+      parts.push(`code:\n${node.body}`);
     }
 
     return parts.join('\n');

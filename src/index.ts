@@ -200,6 +200,7 @@ export class CodeGraph {
       sqliteVssLoadablePaths: semantic.sqliteVssEnabled === true
         ? semantic.sqliteVssProbe?.loadablePaths
         : undefined,
+      projectRoot: this.projectRoot,
     });
   }
 

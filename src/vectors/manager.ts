@@ -4,12 +4,14 @@
  * High-level manager that coordinates embedding generation and vector search.
  */
 
+import * as fs from 'fs';
 import { SqliteDatabase } from '../db/sqlite-adapter';
 import { Node, SearchResult, SearchOptions } from '../types';
 import { TextEmbedder, createEmbedder, EmbedderOptions, EmbedderStatusUpdate } from './embedder';
 import { VectorSearchManager, createVectorSearch } from './search';
 import { SqliteVssLoadablePaths } from './sqlite-vss-probe';
 import { QueryBuilder } from '../db/queries';
+import { validatePathWithinRoot } from '../utils';
 import * as crypto from 'crypto';
 
 /**
@@ -47,6 +49,13 @@ export interface VectorManagerOptions {
 
   /** Init-probed sqlite-vss extension paths for ANN search */
   sqliteVssLoadablePaths?: SqliteVssLoadablePaths;
+
+  /**
+   * Project root, used to read each node's source body for embedding. When
+   * omitted, embeddings fall back to metadata-only — back-compat for callers
+   * that don't have a project root handy.
+   */
+  projectRoot?: string;
 }
 
 /**
@@ -76,6 +85,7 @@ export class VectorManager {
   private queries: QueryBuilder;
   private nodeKinds: Node['kind'][];
   private batchSize: number;
+  private projectRoot: string | undefined;
   private initialized = false;
 
   constructor(
@@ -92,6 +102,42 @@ export class VectorManager {
     this.queries = queries;
     this.nodeKinds = options.nodeKinds || DEFAULT_NODE_KINDS;
     this.batchSize = options.batchSize || 32;
+    this.projectRoot = options.projectRoot;
+  }
+
+  /**
+   * Read a node's source body from disk. Returns undefined when projectRoot
+   * isn't set, the path escapes the root, the file can't be read, or the node
+   * has no line range — caller falls back to metadata-only embedding text.
+   *
+   * Uses the per-call fileCache so a 50-method class reads its file once
+   * instead of 50 times.
+   */
+  private getNodeBody(node: Node, fileCache: Map<string, string[]>): string | undefined {
+    if (!this.projectRoot) return undefined;
+    if (!node.startLine || !node.endLine) return undefined;
+
+    let lines = fileCache.get(node.filePath);
+    if (lines === undefined) {
+      const abs = validatePathWithinRoot(this.projectRoot, node.filePath);
+      if (!abs) {
+        fileCache.set(node.filePath, []);
+        return undefined;
+      }
+      try {
+        lines = fs.readFileSync(abs, 'utf-8').split('\n');
+      } catch {
+        fileCache.set(node.filePath, []);
+        return undefined;
+      }
+      fileCache.set(node.filePath, lines);
+    }
+    if (lines.length === 0) return undefined;
+
+    const startIdx = Math.max(0, node.startLine - 1);
+    const endIdx = Math.min(lines.length, node.endLine);
+    if (startIdx >= endIdx) return undefined;
+    return lines.slice(startIdx, endIdx).join('\n');
   }
 
   /**
@@ -139,11 +185,17 @@ export class VectorManager {
     }
 
     // Remove vectors for nodes no longer present, then embed nodes whose text
-    // or model changed.
+    // or model changed. The hash-based staleness check below already covers a
+    // createNodeText format change (e.g. now including body) — when the body
+    // is appended for the first time, every existing node's text hash changes
+    // and they all flow back into the embed loop, no migration code needed.
     this.searchManager.deleteStaleVectors();
     const model = this.embedder.getModelId();
+    // Per-call file cache, shared across the staleness scan and the embed
+    // loop so a 50-method class reads its source file once total.
+    const fileCache = new Map<string, string[]>();
     const newNodes = nodesToEmbed.filter((node) => {
-      const text = TextEmbedder.createNodeText(node);
+      const text = TextEmbedder.createNodeText({ ...node, body: this.getNodeBody(node, fileCache) });
       return !this.searchManager.hasCurrentVector(
         node.id,
         model,
@@ -165,7 +217,9 @@ export class VectorManager {
         const batch = newNodes.slice(i, i + this.batchSize);
 
         // Create text representations
-        const texts = batch.map((node) => TextEmbedder.createNodeText(node));
+        const texts = batch.map((node) =>
+          TextEmbedder.createNodeText({ ...node, body: this.getNodeBody(node, fileCache) })
+        );
 
         // Generate embeddings
         const result = await this.embedder.embedBatch(texts, 'document');
@@ -211,7 +265,8 @@ export class VectorManager {
       throw new Error('VectorManager not initialized. Call initialize() first.');
     }
 
-    const text = TextEmbedder.createNodeText(node);
+    const body = this.getNodeBody(node, new Map());
+    const text = TextEmbedder.createNodeText({ ...node, body });
     const result = await this.embedder.embed(text);
     this.searchManager.storeVector(node.id, result.embedding, result.model, this.hashText(text));
   }
