@@ -19,19 +19,32 @@ export interface ModelCapabilities {
   dimension: number;
   defaultBatchSize: number;
   maxBatchSize: number;
+  /**
+   * Per-text input ceiling, in characters. Enforced client-side before the
+   * request leaves the embedder so providers without a server-side `truncate`
+   * flag (SiliconFlow rejects all variants with 400) don't blow up on oversized
+   * code bodies. Gemini silently truncates, Jina honors `truncate: true`; this
+   * gives all three providers a single consistent ceiling.
+   *
+   * Three known embedding models all cap at 8192 tokens. Empirically (see
+   * `tmp/sf-truncate-probe2.mjs`) bge-m3 charges ~0.28 tokens/char on typed
+   * code; 28000 chars ≈ 7800 tokens with a small safety margin under the cap.
+   */
+  maxInputChars: number;
 }
 
-// Per-model capabilities — single source of truth for vector dimension and
-// provider-appropriate batch sizing. Adding a model means adding a row here
-// plus a per-provider request builder.
+// Per-model capabilities — single source of truth for vector dimension,
+// provider-appropriate batch sizing, and the per-text length ceiling. Adding
+// a model means adding a row here plus a per-provider request builder.
 export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
-  'gemini-embedding-2':           { dimension: 768,  defaultBatchSize: 32,   maxBatchSize: 100  },
-  'jina-embeddings-v5-text-nano': { dimension: 768,  defaultBatchSize: 32,   maxBatchSize: 2048 },
-  'BAAI/bge-m3':                  { dimension: 1024, defaultBatchSize: 1024, maxBatchSize: 4096 },
+  'gemini-embedding-2':           { dimension: 768,  defaultBatchSize: 32,   maxBatchSize: 100,  maxInputChars: 28000 },
+  'jina-embeddings-v5-text-nano': { dimension: 768,  defaultBatchSize: 32,   maxBatchSize: 2048, maxInputChars: 28000 },
+  'BAAI/bge-m3':                  { dimension: 1024, defaultBatchSize: 1024, maxBatchSize: 4096, maxInputChars: 28000 },
 };
 
 const FALLBACK_DIMENSION = 768;
 const FALLBACK_BATCH_SIZE = 32;
+const FALLBACK_MAX_INPUT_CHARS = 28000;
 
 export function getModelCapabilities(modelId: string): ModelCapabilities | undefined {
   return MODEL_CAPABILITIES[modelId];
@@ -184,6 +197,13 @@ export class TextEmbedder {
     return getModelCapabilities(this.modelId)?.maxBatchSize ?? FALLBACK_BATCH_SIZE;
   }
 
+  /**
+   * Per-text character ceiling enforced before sending. See ModelCapabilities.
+   */
+  getMaxInputChars(): number {
+    return getModelCapabilities(this.modelId)?.maxInputChars ?? FALLBACK_MAX_INPUT_CHARS;
+  }
+
   setStatusReporter(reporter?: (status: EmbedderStatusUpdate) => void): void {
     this.statusReporter = reporter;
   }
@@ -240,8 +260,18 @@ export class TextEmbedder {
       };
     }
 
+    // Enforce the per-text input ceiling client-side. Gemini silently
+    // truncates; Jina honors `truncate: true`; SiliconFlow rejects oversized
+    // inputs with 400 even when its documented `truncate` field is set
+    // (probed: not actually implemented for bge-m3). Truncating here gives
+    // all three providers a single consistent ceiling and removes the need
+    // for provider-specific server-side flags. `createNodeText` puts the
+    // body last so truncation discards code-tail, not signature/docstring.
+    const max = this.getMaxInputChars();
+    const truncated = texts.map((t) => (t.length > max ? t.slice(0, max) : t));
+
     const startTime = Date.now();
-    const embeddings = await this.embedPreparedBatch(texts, type);
+    const embeddings = await this.embedPreparedBatch(truncated, type);
 
     return {
       embeddings,

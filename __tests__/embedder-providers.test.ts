@@ -73,6 +73,12 @@ describe('TextEmbedder accessors per provider/model', () => {
     expect(e.getMaxBatchSize()).toBe(4096);
   });
 
+  it('all three providers expose the documented maxInputChars', () => {
+    expect(createEmbedder({ provider: 'gemini',      apiKey: 'k' }).getMaxInputChars()).toBe(28000);
+    expect(createEmbedder({ provider: 'jina',        apiKey: 'k' }).getMaxInputChars()).toBe(28000);
+    expect(createEmbedder({ provider: 'siliconflow', apiKey: 'k' }).getMaxInputChars()).toBe(28000);
+  });
+
   it('siliconflow with default model resolves to BAAI/bge-m3', () => {
     const e = createEmbedder({ provider: 'siliconflow', apiKey: 'k' });
     expect(e.getModelId()).toBe(DEFAULT_SILICONFLOW_MODEL);
@@ -150,6 +156,20 @@ describe('SiliconFlow embed request', () => {
     const [, init] = fetchSpy.mock.calls[0]!;
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.input).toEqual(['how does auth work']);
+  });
+
+  it('truncates oversized inputs to the model maxInputChars before sending', async () => {
+    const e = createEmbedder({ provider: 'siliconflow', apiKey: 'sk-x' });
+    await e.initialize();
+    const max = e.getMaxInputChars(); // 28000 for BAAI/bge-m3
+    const huge = 'x'.repeat(max + 50000);
+    const fine = 'short text';
+    await e.embedBatch([huge, fine], 'document');
+
+    const [, init] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.input[0]).toHaveLength(max);
+    expect(body.input[1]).toBe(fine); // untouched
   });
 });
 

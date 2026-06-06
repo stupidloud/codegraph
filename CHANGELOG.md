@@ -9,6 +9,10 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixes
+
+- SiliconFlow embedding requests no longer fail with `400 The parameter is invalid` on large symbols. SiliconFlow returns 400 instead of truncating inputs past `BAAI/bge-m3`'s 8192-token cap (its documented `truncate` field is not actually implemented for bge-m3), so embeddings now truncate each text to the model's documented input ceiling client-side. The same ceiling applies to Gemini and Jina for consistency. Since `createNodeText` puts the source body last, the truncation drops code-tail rather than signature/docstring — the bits that carry the most retrieval signal.
+
 ### New Features
 
 - Added SiliconFlow as a third semantic-search provider, using `BAAI/bge-m3` (1024-dim, batch 1024 by default, up to 4096 per request). `codegraph init` now offers SiliconFlow alongside Gemini and Jina and only asks for an API key. SiliconFlow's generous free-tier RPM makes indexing large repos much faster.
