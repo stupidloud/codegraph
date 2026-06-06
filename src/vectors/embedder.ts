@@ -8,14 +8,38 @@
 /**
  * Default embedding models.
  */
-export type EmbeddingProvider = 'gemini' | 'jina';
+export type EmbeddingProvider = 'gemini' | 'jina' | 'siliconflow';
 export const DEFAULT_PROVIDER: EmbeddingProvider = 'gemini';
 export const DEFAULT_MODEL = 'gemini-embedding-2';
 export const DEFAULT_GEMINI_MODEL = 'gemini-embedding-2';
 export const DEFAULT_JINA_MODEL = 'jina-embeddings-v5-text-nano';
-export const EMBEDDING_DIMENSION = 768;
+export const DEFAULT_SILICONFLOW_MODEL = 'BAAI/bge-m3';
+
+export interface ModelCapabilities {
+  dimension: number;
+  defaultBatchSize: number;
+  maxBatchSize: number;
+}
+
+// Per-model capabilities — single source of truth for vector dimension and
+// provider-appropriate batch sizing. Adding a model means adding a row here
+// plus a per-provider request builder.
+export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
+  'gemini-embedding-2':           { dimension: 768,  defaultBatchSize: 32,   maxBatchSize: 100  },
+  'jina-embeddings-v5-text-nano': { dimension: 768,  defaultBatchSize: 32,   maxBatchSize: 2048 },
+  'BAAI/bge-m3':                  { dimension: 1024, defaultBatchSize: 1024, maxBatchSize: 4096 },
+};
+
+const FALLBACK_DIMENSION = 768;
+const FALLBACK_BATCH_SIZE = 32;
+
+export function getModelCapabilities(modelId: string): ModelCapabilities | undefined {
+  return MODEL_CAPABILITIES[modelId];
+}
+
 const GEMINI_EMBEDDING_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const JINA_EMBEDDING_ENDPOINT = 'https://api.jina.ai/v1/embeddings';
+const SILICONFLOW_EMBEDDING_ENDPOINT = 'https://api.siliconflow.cn/v1/embeddings';
 const JINA_MAX_REQUESTS_PER_MINUTE = 500;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const MAX_NETWORK_RETRY_ATTEMPTS = 3;
@@ -43,7 +67,7 @@ export interface EmbedderOptions {
 
 export interface EmbedderStatusUpdate {
   phase: 'retry_wait';
-  provider: 'Gemini' | 'Jina';
+  provider: 'Gemini' | 'Jina' | 'SiliconFlow';
   retryInMs: number;
   attempt: number;
 }
@@ -83,7 +107,8 @@ type GeminiEmbeddingResponse = {
   embeddings?: Array<{ values?: number[] }>;
 };
 
-type JinaEmbeddingResponse = {
+// OpenAI-compatible response shape (used by Jina and SiliconFlow).
+type OpenAICompatibleEmbeddingResponse = {
   data?: Array<{ embedding?: number[] }>;
 };
 
@@ -139,10 +164,24 @@ export class TextEmbedder {
   }
 
   /**
-   * Get the embedding dimension
+   * Get the embedding dimension for the configured model.
    */
   getDimension(): number {
-    return EMBEDDING_DIMENSION;
+    return getModelCapabilities(this.modelId)?.dimension ?? FALLBACK_DIMENSION;
+  }
+
+  /**
+   * Get the default batch size for the configured model.
+   */
+  getDefaultBatchSize(): number {
+    return getModelCapabilities(this.modelId)?.defaultBatchSize ?? FALLBACK_BATCH_SIZE;
+  }
+
+  /**
+   * Get the maximum allowed batch size for the configured model.
+   */
+  getMaxBatchSize(): number {
+    return getModelCapabilities(this.modelId)?.maxBatchSize ?? FALLBACK_BATCH_SIZE;
   }
 
   setStatusReporter(reporter?: (status: EmbedderStatusUpdate) => void): void {
@@ -195,7 +234,7 @@ export class TextEmbedder {
     if (texts.length === 0) {
       return {
         embeddings: [],
-        dimension: EMBEDDING_DIMENSION,
+        dimension: this.getDimension(),
         model: this.modelId,
         durationMs: 0,
       };
@@ -206,7 +245,7 @@ export class TextEmbedder {
 
     return {
       embeddings,
-      dimension: embeddings[0]?.length ?? EMBEDDING_DIMENSION,
+      dimension: embeddings[0]?.length ?? this.getDimension(),
       model: this.modelId,
       durationMs: Date.now() - startTime,
     };
@@ -222,6 +261,10 @@ export class TextEmbedder {
 
     if (this.provider === 'jina') {
       return this.embedPreparedBatchWithJina(texts, type);
+    }
+
+    if (this.provider === 'siliconflow') {
+      return this.embedPreparedBatchWithSiliconFlow(texts);
     }
 
     return this.embedPreparedBatchWithGemini(texts, type);
@@ -247,7 +290,7 @@ export class TextEmbedder {
             parts: [{ text }],
           },
           taskType,
-          outputDimensionality: EMBEDDING_DIMENSION,
+          outputDimensionality: this.getDimension(),
         })),
       }),
     });
@@ -300,21 +343,50 @@ export class TextEmbedder {
       throw new Error(await this.formatApiErrorMessage('Jina', response));
     }
 
-    const json = await response.json() as JinaEmbeddingResponse;
+    return this.parseOpenAICompatibleResponse(response, 'Jina', texts.length);
+  }
+
+  private async embedPreparedBatchWithSiliconFlow(texts: string[]): Promise<Float32Array[]> {
+    const response = await this.fetchWithRetry(SILICONFLOW_EMBEDDING_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.apiKey!}`,
+      },
+      body: JSON.stringify({
+        model: this.modelId,
+        input: texts,
+        encoding_format: 'float',
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(await this.formatApiErrorMessage('SiliconFlow', response));
+    }
+
+    return this.parseOpenAICompatibleResponse(response, 'SiliconFlow', texts.length);
+  }
+
+  private async parseOpenAICompatibleResponse(
+    response: Response,
+    providerLabel: 'Jina' | 'SiliconFlow',
+    expectedCount: number
+  ): Promise<Float32Array[]> {
+    const json = (await response.json()) as OpenAICompatibleEmbeddingResponse;
     const values = json.data?.map((embedding) => embedding.embedding);
-    if (!values || values.length !== texts.length) {
-      throw new Error('Jina batch embedding response count did not match request count');
+    if (!values || values.length !== expectedCount) {
+      throw new Error(`${providerLabel} batch embedding response count did not match request count`);
     }
 
     const embeddings = values.map((embeddingValues) => {
       if (!embeddingValues || embeddingValues.length === 0) {
-        throw new Error('Jina embedding response did not include values');
+        throw new Error(`${providerLabel} embedding response did not include values`);
       }
       return new Float32Array(embeddingValues);
     });
 
     if (embeddings.some((embedding) => embedding.length !== embeddings[0]!.length)) {
-      throw new Error('Jina batch embedding response contained mixed dimensions');
+      throw new Error(`${providerLabel} batch embedding response contained mixed dimensions`);
     }
 
     return embeddings;
@@ -472,11 +544,25 @@ export class TextEmbedder {
   }
 
   private getDefaultModelForProvider(provider: EmbeddingProvider): string {
-    return provider === 'jina' ? DEFAULT_JINA_MODEL : DEFAULT_GEMINI_MODEL;
+    switch (provider) {
+      case 'jina':
+        return DEFAULT_JINA_MODEL;
+      case 'siliconflow':
+        return DEFAULT_SILICONFLOW_MODEL;
+      default:
+        return DEFAULT_GEMINI_MODEL;
+    }
   }
 
-  private getProviderDisplayName(): 'Gemini' | 'Jina' {
-    return this.provider === 'jina' ? 'Jina' : 'Gemini';
+  private getProviderDisplayName(): 'Gemini' | 'Jina' | 'SiliconFlow' {
+    switch (this.provider) {
+      case 'jina':
+        return 'Jina';
+      case 'siliconflow':
+        return 'SiliconFlow';
+      default:
+        return 'Gemini';
+    }
   }
 
   /**

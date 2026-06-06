@@ -11,6 +11,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### New Features
 
+- Added SiliconFlow as a third semantic-search provider, using `BAAI/bge-m3` (1024-dim, batch 1024 by default, up to 4096 per request). `codegraph init` now offers SiliconFlow alongside Gemini and Jina and only asks for an API key. SiliconFlow's generous free-tier RPM makes indexing large repos much faster.
+- Embedding dimension and batch size are now per-model. Switching providers no longer requires editing constants in the source — `codegraph_explore` and queries pick up the right dimension from the configured provider automatically. Switching from a 768-dim provider (Gemini/Jina) to a 1024-dim provider (SiliconFlow) rebuilds the vector index on next open and re-embeds your symbols.
 - `codegraph status --json` now also reports the running CLI `version`, the index directory (`indexPath`), and a `lastIndexed` timestamp (ISO-8601, or null when nothing's indexed yet), so CI and scripts can pin the CLI version and check index freshness from a single command. A matching `CodeGraph.getLastIndexedAt()` library method exposes the same freshness check without shelling out. Thanks @12122J and @eddieran. (#329)
 
 ### Fixes

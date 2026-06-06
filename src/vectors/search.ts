@@ -7,7 +7,7 @@
 
 import { SqliteDatabase } from '../db/sqlite-adapter';
 import { Node } from '../types';
-import { TextEmbedder, EMBEDDING_DIMENSION } from './embedder';
+import { TextEmbedder } from './embedder';
 import { SqliteVssLoadablePaths } from './sqlite-vss-probe';
 
 function stripPlatformExtensionSuffix(loadablePath: string): string {
@@ -41,11 +41,18 @@ export class VectorSearchManager {
   private vssEnabled = false;
   private embeddingDimension: number;
   private vssLoadablePaths?: SqliteVssLoadablePaths;
+  private currentModel?: string;
 
-  constructor(db: SqliteDatabase, dimension: number = EMBEDDING_DIMENSION, vssLoadablePaths?: SqliteVssLoadablePaths) {
+  constructor(
+    db: SqliteDatabase,
+    dimension: number = 768,
+    vssLoadablePaths?: SqliteVssLoadablePaths,
+    currentModel?: string
+  ) {
     this.db = db;
     this.embeddingDimension = dimension;
     this.vssLoadablePaths = vssLoadablePaths;
+    this.currentModel = currentModel;
   }
 
   /**
@@ -55,12 +62,24 @@ export class VectorSearchManager {
    * search if the extension is not available.
    */
   async initialize(): Promise<void> {
+    // Order matters: the `vectors` BLOB table must exist before we can scan
+    // its `model` column for staleness, and any stale rows must be cleared
+    // before we (re)build the VSS virtual table — otherwise the BLOB table
+    // and the VSS index would disagree on row identity.
+    this.ensureVectorsTable();
+
+    // Provider→model→dimension is a pinned identity chain: a different
+    // configured model means a different embedding space, regardless of
+    // whether dimensions happen to match. Wipe stale corpora before either
+    // mode initializes its index structures.
+    if (this.currentModel) {
+      this.clearIfModelChanged(this.currentModel);
+    }
+
     if (this.vssLoadablePaths) {
       try {
         this.loadVssExtension(this.vssLoadablePaths);
         this.vssEnabled = true;
-
-        // Create the VSS virtual table
         this.createVssTable();
       } catch {
         // Fall back to brute-force search silently.
@@ -69,9 +88,29 @@ export class VectorSearchManager {
     } else {
       this.vssEnabled = false;
     }
+  }
 
-    // Ensure the vectors table exists (for both VSS and fallback modes)
-    this.ensureVectorsTable();
+  /**
+   * If `vectors` contains any rows tagged with a model other than the
+   * currently configured one, drop the VSS tables (if present) and clear
+   * the BLOB store. `VectorManager.embedAllNodes()` will then re-embed
+   * everything on the next sync.
+   */
+  private clearIfModelChanged(currentModel: string): void {
+    const stale = this.db
+      .prepare('SELECT 1 FROM vectors WHERE model != ? LIMIT 1')
+      .get(currentModel);
+    if (!stale) return;
+
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[codegraph] stored vectors were embedded with a different model than the ` +
+        `currently configured "${currentModel}". Clearing the vector store; the next ` +
+        `index sync will re-embed all symbols.`
+    );
+    this.db.exec('DROP TABLE IF EXISTS vss_vectors;');
+    this.db.exec('DROP TABLE IF EXISTS vss_map;');
+    this.db.exec('DELETE FROM vectors;');
   }
 
   /**
@@ -93,24 +132,24 @@ export class VectorSearchManager {
   }
 
   /**
-   * Create the VSS virtual table for vector search
+   * Create the VSS virtual table for vector search. Dimension is baked into
+   * the virtual table at CREATE time; the model-change wipe in
+   * `clearIfModelChanged()` guarantees we never see a stale `vss_vectors`
+   * at a different dimension by the time we get here.
    */
   private createVssTable(): void {
-    // Check if the table already exists
     const tableExists = this.db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='vss_vectors'")
       .get();
 
     if (!tableExists) {
-      // Create VSS virtual table
-      // vss0 is the vector search extension
+      // vss0 is the vector search extension.
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS vss_vectors USING vss0(
           embedding(${this.embeddingDimension})
         );
       `);
 
-      // Create mapping table to link VSS rowids to node IDs
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS vss_map (
           rowid INTEGER PRIMARY KEY,
@@ -118,7 +157,6 @@ export class VectorSearchManager {
         );
       `);
 
-      // Create index on node_id
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_vss_map_node ON vss_map(node_id);
       `);
@@ -508,7 +546,8 @@ export class VectorSearchManager {
 export function createVectorSearch(
   db: SqliteDatabase,
   dimension?: number,
-  vssLoadablePaths?: SqliteVssLoadablePaths
+  vssLoadablePaths?: SqliteVssLoadablePaths,
+  currentModel?: string
 ): VectorSearchManager {
-  return new VectorSearchManager(db, dimension, vssLoadablePaths);
+  return new VectorSearchManager(db, dimension, vssLoadablePaths, currentModel);
 }

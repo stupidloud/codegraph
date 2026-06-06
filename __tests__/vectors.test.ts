@@ -527,20 +527,21 @@ describe('Vector Embeddings', () => {
           });
           await embedder.initialize();
 
+          // Jina throttle: 500 RPM (see JINA_MAX_REQUESTS_PER_MINUTE).
           const batch = Array.from({ length: 32 }, (_, i) => `node ${i}`);
-          for (let i = 0; i < 100; i++) {
+          for (let i = 0; i < 500; i++) {
             await embedder.embedBatch(batch, 'document');
           }
 
           const nextBatch = embedder.embedBatch(batch, 'document');
           await Promise.resolve();
 
-          expect(fetchMock).toHaveBeenCalledTimes(100);
+          expect(fetchMock).toHaveBeenCalledTimes(500);
           await vi.advanceTimersByTimeAsync(59_999);
-          expect(fetchMock).toHaveBeenCalledTimes(100);
+          expect(fetchMock).toHaveBeenCalledTimes(500);
           await vi.advanceTimersByTimeAsync(1);
           await nextBatch;
-          expect(fetchMock).toHaveBeenCalledTimes(101);
+          expect(fetchMock).toHaveBeenCalledTimes(501);
         } finally {
           vi.useRealTimers();
         }
@@ -728,6 +729,40 @@ describe('Vector Embeddings', () => {
       await searchManager.initialize();
 
       expect(searchManager.isVssEnabled()).toBe(false);
+    });
+
+    it('clears vectors when the configured model differs from stored rows (brute-force path)', async () => {
+      // Seed with rows from an old model — sqlite-vss is OFF here (no
+      // loadable paths passed), which is exactly the path the dim-parse
+      // version of this check used to miss.
+      await searchManager.initialize();
+      searchManager.storeVector('node1', new Float32Array([0.1, 0.2, 0.3]), 'old-model');
+      searchManager.storeVector('node2', new Float32Array([0.4, 0.5, 0.6]), 'old-model');
+      expect(searchManager.getVectorCount()).toBe(2);
+
+      // Re-open the same DB configured for a new model — should wipe.
+      const fresh = createVectorSearch(db.getDb(), TEST_DIMENSION, undefined, 'new-model');
+      await fresh.initialize();
+
+      expect(fresh.getVectorCount()).toBe(0);
+    });
+
+    it('keeps vectors when the configured model matches stored rows', async () => {
+      await searchManager.initialize();
+      searchManager.storeVector('node1', new Float32Array([0.1, 0.2, 0.3]), 'stable-model');
+      expect(searchManager.getVectorCount()).toBe(1);
+
+      const fresh = createVectorSearch(db.getDb(), TEST_DIMENSION, undefined, 'stable-model');
+      await fresh.initialize();
+
+      expect(fresh.getVectorCount()).toBe(1);
+    });
+
+    it('is a no-op on an empty vectors table even when a model is configured', async () => {
+      const fresh = createVectorSearch(db.getDb(), TEST_DIMENSION, undefined, 'whatever-model');
+      await fresh.initialize();
+
+      expect(fresh.getVectorCount()).toBe(0);
     });
 
     it('should return null for non-existent vectors', async () => {

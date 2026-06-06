@@ -508,12 +508,16 @@ export interface CodeGraphConfig {
     /** Enable remote-provider-backed semantic embeddings */
     enabled: boolean;
     /** Embedding provider */
-    provider: 'gemini' | 'jina';
+    provider: 'gemini' | 'jina' | 'siliconflow';
     /** Embedding provider API key. Stored in project config when enabled. */
     apiKey?: string;
     /** Embedding model */
     model?: string;
-    /** Number of node embeddings to generate per manager batch */
+    /**
+     * Optional override for the per-manager batch size. When undefined,
+     * defaults to the model's `defaultBatchSize` from MODEL_CAPABILITIES,
+     * clamped to that model's `maxBatchSize`.
+     */
     batchSize?: number;
     /** Whether sqlite-vss passed the init-time child-process probe */
     sqliteVssEnabled?: boolean;

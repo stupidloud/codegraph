@@ -97,11 +97,15 @@ export class VectorManager {
     this.searchManager = createVectorSearch(
       db,
       this.embedder.getDimension(),
-      options.sqliteVssLoadablePaths
+      options.sqliteVssLoadablePaths,
+      this.embedder.getModelId()
     );
     this.queries = queries;
     this.nodeKinds = options.nodeKinds || DEFAULT_NODE_KINDS;
-    this.batchSize = options.batchSize || 32;
+    // batchSize: user override (clamped to model max) → model default → embedder fallback
+    const maxBatch = this.embedder.getMaxBatchSize();
+    const requested = options.batchSize ?? this.embedder.getDefaultBatchSize();
+    this.batchSize = Math.min(Math.max(1, requested), maxBatch);
     this.projectRoot = options.projectRoot;
   }
 

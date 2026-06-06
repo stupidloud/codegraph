@@ -101,7 +101,7 @@ export function validateConfig(config: unknown): config is CodeGraphConfig {
     if (typeof c.semanticSearch !== 'object' || c.semanticSearch === null) return false;
     const s = c.semanticSearch as Record<string, unknown>;
     if (typeof s.enabled !== 'boolean') return false;
-    if (s.provider !== 'gemini' && s.provider !== 'jina') return false;
+    if (s.provider !== 'gemini' && s.provider !== 'jina' && s.provider !== 'siliconflow') return false;
     if (s.apiKey !== undefined && typeof s.apiKey !== 'string') return false;
     if (s.model !== undefined && typeof s.model !== 'string') return false;
     if (s.batchSize !== undefined && typeof s.batchSize !== 'number') return false;

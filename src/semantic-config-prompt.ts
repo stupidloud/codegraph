@@ -27,8 +27,9 @@ export async function promptSemanticSearchConfig(
   const provider = await clack.select({
     message: 'Embedding provider',
     options: [
-      { value: 'gemini', label: 'Gemini', hint: 'gemini-embedding-2, 768 dimensions' },
-      { value: 'jina', label: 'Jina', hint: 'jina-embeddings-v5-text-nano, 768 dimensions' },
+      { value: 'gemini', label: 'Gemini', hint: 'gemini-embedding-2, 768-d, batch 32' },
+      { value: 'jina', label: 'Jina', hint: 'jina-embeddings-v5-text-nano, 768-d, batch 32' },
+      { value: 'siliconflow', label: 'SiliconFlow', hint: 'BAAI/bge-m3, 1024-d, batch 1024, generous free tier' },
     ],
     initialValue: 'gemini',
   });
@@ -38,11 +39,16 @@ export async function promptSemanticSearchConfig(
     process.exit(0);
   }
 
-  const selectedProvider = provider as 'gemini' | 'jina';
-  const providerName = selectedProvider === 'jina' ? 'Jina' : 'Gemini';
+  const selectedProvider = provider as 'gemini' | 'jina' | 'siliconflow';
+  const providerName =
+    selectedProvider === 'jina' ? 'Jina' :
+    selectedProvider === 'siliconflow' ? 'SiliconFlow' : 'Gemini';
+  const keyPlaceholder =
+    selectedProvider === 'jina' ? 'jina_...' :
+    selectedProvider === 'siliconflow' ? 'sk-...' : 'AIza...';
   const apiKey = await clack.password({
     message: `${providerName} API key`,
-    placeholder: selectedProvider === 'jina' ? 'jina_...' : 'AIza...',
+    placeholder: keyPlaceholder,
     validate(value) {
       if (!value.trim()) {
         return `${providerName} API key is required when semantic search is enabled`;
@@ -56,8 +62,15 @@ export async function promptSemanticSearchConfig(
     process.exit(0);
   }
 
-  const model = selectedProvider === 'jina' ? 'jina-embeddings-v5-text-nano' : 'gemini-embedding-2';
-  clack.log.info(`${providerName} semantic search will use ${model} with 768 dimensions.`);
+  const model =
+    selectedProvider === 'jina' ? 'jina-embeddings-v5-text-nano' :
+    selectedProvider === 'siliconflow' ? 'BAAI/bge-m3' :
+    'gemini-embedding-2';
+  const dimension = selectedProvider === 'siliconflow' ? 1024 : 768;
+  const defaultBatchSize = selectedProvider === 'siliconflow' ? 1024 : 32;
+  clack.log.info(
+    `${providerName} semantic search will use ${model} with ${dimension} dimensions, batch ${defaultBatchSize}.`
+  );
 
   return {
     semanticSearch: {
@@ -65,7 +78,8 @@ export async function promptSemanticSearchConfig(
       provider: selectedProvider,
       apiKey: apiKey.trim(),
       model,
-      batchSize: 32,
+      // batchSize intentionally omitted — let the embedder pull its default
+      // from MODEL_CAPABILITIES so config files stay terse and future-proof.
     },
   };
 }
