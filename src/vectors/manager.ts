@@ -455,17 +455,27 @@ export class VectorManager {
     total: number,
     onProgress?: (progress: EmbeddingProgress) => void
   ): void {
-    if (!onProgress || status.phase !== 'retry_wait') {
+    if (!onProgress) return;
+
+    if (status.phase === 'retry_wait') {
+      const retryInSeconds = Math.max(1, Math.ceil(status.retryInMs / 1000));
+      onProgress({
+        current,
+        total,
+        status: 'waiting',
+        detail: `${retryInSeconds}s (try ${status.attempt})`,
+      });
       return;
     }
 
-    const retryInSeconds = Math.max(1, Math.ceil(status.retryInMs / 1000));
-    onProgress({
-      current,
-      total,
-      status: 'waiting',
-      detail: `${retryInSeconds}s (try ${status.attempt})`,
-    });
+    if (status.phase === 'shrink_retry') {
+      onProgress({
+        current,
+        total,
+        status: 'waiting',
+        detail: `shrunk to ${status.shrunkToChars} chars (try ${status.attempt})`,
+      });
+    }
   }
 }
 

@@ -73,11 +73,6 @@ describe('TextEmbedder accessors per provider/model', () => {
     expect(e.getMaxBatchSize()).toBe(4096);
   });
 
-  it('all three providers expose the documented maxInputChars', () => {
-    expect(createEmbedder({ provider: 'gemini',      apiKey: 'k' }).getMaxInputChars()).toBe(28000);
-    expect(createEmbedder({ provider: 'jina',        apiKey: 'k' }).getMaxInputChars()).toBe(28000);
-    expect(createEmbedder({ provider: 'siliconflow', apiKey: 'k' }).getMaxInputChars()).toBe(28000);
-  });
 
   it('siliconflow with default model resolves to BAAI/bge-m3', () => {
     const e = createEmbedder({ provider: 'siliconflow', apiKey: 'k' });
@@ -158,18 +153,101 @@ describe('SiliconFlow embed request', () => {
     expect(body.input).toEqual(['how does auth work']);
   });
 
-  it('truncates oversized inputs to the model maxInputChars before sending', async () => {
+});
+
+describe('SiliconFlow 400 shrink-retry self-healing', () => {
+  function tokenLimitResponse() {
+    return new Response(
+      JSON.stringify({ code: 20015, message: 'The parameter is invalid. Please check again.', data: null }),
+      { status: 400, statusText: 'Bad Request', headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+  function okResponse(inputCount: number) {
+    const data = Array.from({ length: inputCount }, (_, i) => ({
+      embedding: new Array(1024).fill(0).map((_, j) => ((i + j) % 100) / 100),
+      index: i,
+      object: 'embedding',
+    }));
+    return new Response(JSON.stringify({ data, model: 'BAAI/bge-m3', usage: { total_tokens: 100 } }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  afterEach(() => { fetchSpy?.mockRestore(); });
+
+  it('shrinks each text by 10% and retries when SiliconFlow returns 400 code 20015', async () => {
+    fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(tokenLimitResponse())
+      .mockResolvedValueOnce(tokenLimitResponse())
+      .mockResolvedValueOnce(okResponse(2));
+
     const e = createEmbedder({ provider: 'siliconflow', apiKey: 'sk-x' });
     await e.initialize();
-    const max = e.getMaxInputChars(); // 28000 for BAAI/bge-m3
-    const huge = 'x'.repeat(max + 50000);
-    const fine = 'short text';
-    await e.embedBatch([huge, fine], 'document');
+    const big = 'x'.repeat(10000);
+    const small = 'short';
+    const result = await e.embedBatch([big, small], 'document');
 
-    const [, init] = fetchSpy.mock.calls[0]!;
-    const body = JSON.parse((init as RequestInit).body as string);
-    expect(body.input[0]).toHaveLength(max);
-    expect(body.input[1]).toBe(fine); // untouched
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    const body1 = JSON.parse((fetchSpy.mock.calls[0]![1] as RequestInit).body as string);
+    const body2 = JSON.parse((fetchSpy.mock.calls[1]![1] as RequestInit).body as string);
+    const body3 = JSON.parse((fetchSpy.mock.calls[2]![1] as RequestInit).body as string);
+    expect(body1.input[0]).toHaveLength(10000);
+    expect(body2.input[0]).toHaveLength(9000);
+    expect(body3.input[0]).toHaveLength(8100);
+    // Smaller text is left untouched throughout
+    expect(body1.input[1]).toBe('short');
+    expect(body2.input[1]).toBe('short');
+    expect(body3.input[1]).toBe('short');
+
+    expect(result.embeddings).toHaveLength(2);
+  });
+
+  it('does NOT retry on a 400 that is not the token-limit error (e.g. auth)', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ code: 50001, message: 'Invalid API key' }), {
+        status: 400,
+        statusText: 'Bad Request',
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const e = createEmbedder({ provider: 'siliconflow', apiKey: 'sk-bad' });
+    await e.initialize();
+    await expect(e.embedBatch(['hello'], 'document')).rejects.toThrow(/SiliconFlow.*400/);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up when texts have been shrunk below the minimum length', async () => {
+    // Each fetch call must return a fresh Response — bodies are one-shot streams.
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => tokenLimitResponse());
+
+    const e = createEmbedder({ provider: 'siliconflow', apiKey: 'sk-x' });
+    await e.initialize();
+    // Start at 1000 chars: log(100/1000)/log(0.9) ≈ 22 attempts to hit floor.
+    await expect(e.embedBatch(['x'.repeat(1000)], 'document')).rejects.toThrow(/SiliconFlow.*400/);
+    expect(fetchSpy.mock.calls.length).toBeGreaterThan(15);
+    expect(fetchSpy.mock.calls.length).toBeLessThan(40);
+  });
+
+  it('reports shrink_retry phase via statusReporter so progress UI can show it', async () => {
+    fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(tokenLimitResponse())
+      .mockResolvedValueOnce(okResponse(1));
+
+    const e = createEmbedder({ provider: 'siliconflow', apiKey: 'sk-x' });
+    await e.initialize();
+    const updates: Array<{ phase: string; shrunkToChars?: number; attempt?: number }> = [];
+    e.setStatusReporter((s) => updates.push(s as any));
+    await e.embedBatch(['x'.repeat(5000)], 'document');
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0].phase).toBe('shrink_retry');
+    expect(updates[0].shrunkToChars).toBe(4500);
+    expect(updates[0].attempt).toBe(1);
   });
 });
 

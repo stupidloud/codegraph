@@ -11,7 +11,7 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
-- SiliconFlow embedding requests no longer fail with `400 The parameter is invalid` on large symbols. SiliconFlow returns 400 instead of truncating inputs past `BAAI/bge-m3`'s 8192-token cap (its documented `truncate` field is not actually implemented for bge-m3), so embeddings now truncate each text to the model's documented input ceiling client-side. The same ceiling applies to Gemini and Jina for consistency. Since `createNodeText` puts the source body last, the truncation drops code-tail rather than signature/docstring — the bits that carry the most retrieval signal.
+- SiliconFlow embedding requests now self-heal on `400 The parameter is invalid` (code 20015). SiliconFlow returns 400 instead of truncating inputs that exceed `BAAI/bge-m3`'s 8192-token cap, and its documented `truncate` field is not actually implemented. The handler now retries the same batch with each text shrunk by 10% until SiliconFlow accepts it — no tokenizer or hard-coded character cap to maintain. Token density varies wildly by content (normal code, dense test fixtures, hash blobs, minified bundles, CJK), so this self-tunes per-batch instead of guessing a one-size-fits-all length. Other 400 errors (bad API key, missing model) pass through unchanged. Progress UI shows the shrink retry.
 
 ### New Features
 

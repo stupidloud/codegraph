@@ -19,32 +19,22 @@ export interface ModelCapabilities {
   dimension: number;
   defaultBatchSize: number;
   maxBatchSize: number;
-  /**
-   * Per-text input ceiling, in characters. Enforced client-side before the
-   * request leaves the embedder so providers without a server-side `truncate`
-   * flag (SiliconFlow rejects all variants with 400) don't blow up on oversized
-   * code bodies. Gemini silently truncates, Jina honors `truncate: true`; this
-   * gives all three providers a single consistent ceiling.
-   *
-   * Three known embedding models all cap at 8192 tokens. Empirically (see
-   * `tmp/sf-truncate-probe2.mjs`) bge-m3 charges ~0.28 tokens/char on typed
-   * code; 28000 chars ≈ 7800 tokens with a small safety margin under the cap.
-   */
-  maxInputChars: number;
 }
 
-// Per-model capabilities — single source of truth for vector dimension,
-// provider-appropriate batch sizing, and the per-text length ceiling. Adding
-// a model means adding a row here plus a per-provider request builder.
+// Per-model capabilities — single source of truth for vector dimension and
+// provider-appropriate batch sizing. Token-limit overflow is handled at the
+// SiliconFlow handler with a 400→shrink-10%→retry loop, not via a static
+// per-text char cap (different content has wildly different token density;
+// see `embedPreparedBatchWithSiliconFlow`). Gemini silently truncates and
+// Jina honors `truncate: true`, so they need no client-side cap either.
 export const MODEL_CAPABILITIES: Record<string, ModelCapabilities> = {
-  'gemini-embedding-2':           { dimension: 768,  defaultBatchSize: 32,   maxBatchSize: 100,  maxInputChars: 28000 },
-  'jina-embeddings-v5-text-nano': { dimension: 768,  defaultBatchSize: 32,   maxBatchSize: 2048, maxInputChars: 28000 },
-  'BAAI/bge-m3':                  { dimension: 1024, defaultBatchSize: 1024, maxBatchSize: 4096, maxInputChars: 28000 },
+  'gemini-embedding-2':           { dimension: 768,  defaultBatchSize: 32,   maxBatchSize: 100  },
+  'jina-embeddings-v5-text-nano': { dimension: 768,  defaultBatchSize: 32,   maxBatchSize: 2048 },
+  'BAAI/bge-m3':                  { dimension: 1024, defaultBatchSize: 1024, maxBatchSize: 4096 },
 };
 
 const FALLBACK_DIMENSION = 768;
 const FALLBACK_BATCH_SIZE = 32;
-const FALLBACK_MAX_INPUT_CHARS = 28000;
 
 export function getModelCapabilities(modelId: string): ModelCapabilities | undefined {
   return MODEL_CAPABILITIES[modelId];
@@ -78,12 +68,19 @@ export interface EmbedderOptions {
   showProgress?: boolean;
 }
 
-export interface EmbedderStatusUpdate {
-  phase: 'retry_wait';
-  provider: 'Gemini' | 'Jina' | 'SiliconFlow';
-  retryInMs: number;
-  attempt: number;
-}
+export type EmbedderStatusUpdate =
+  | {
+      phase: 'retry_wait';
+      provider: 'Gemini' | 'Jina' | 'SiliconFlow';
+      retryInMs: number;
+      attempt: number;
+    }
+  | {
+      phase: 'shrink_retry';
+      provider: 'SiliconFlow';
+      shrunkToChars: number;
+      attempt: number;
+    };
 
 /**
  * Text embedding result
@@ -197,13 +194,6 @@ export class TextEmbedder {
     return getModelCapabilities(this.modelId)?.maxBatchSize ?? FALLBACK_BATCH_SIZE;
   }
 
-  /**
-   * Per-text character ceiling enforced before sending. See ModelCapabilities.
-   */
-  getMaxInputChars(): number {
-    return getModelCapabilities(this.modelId)?.maxInputChars ?? FALLBACK_MAX_INPUT_CHARS;
-  }
-
   setStatusReporter(reporter?: (status: EmbedderStatusUpdate) => void): void {
     this.statusReporter = reporter;
   }
@@ -260,18 +250,8 @@ export class TextEmbedder {
       };
     }
 
-    // Enforce the per-text input ceiling client-side. Gemini silently
-    // truncates; Jina honors `truncate: true`; SiliconFlow rejects oversized
-    // inputs with 400 even when its documented `truncate` field is set
-    // (probed: not actually implemented for bge-m3). Truncating here gives
-    // all three providers a single consistent ceiling and removes the need
-    // for provider-specific server-side flags. `createNodeText` puts the
-    // body last so truncation discards code-tail, not signature/docstring.
-    const max = this.getMaxInputChars();
-    const truncated = texts.map((t) => (t.length > max ? t.slice(0, max) : t));
-
     const startTime = Date.now();
-    const embeddings = await this.embedPreparedBatch(truncated, type);
+    const embeddings = await this.embedPreparedBatch(texts, type);
 
     return {
       embeddings,
@@ -377,24 +357,61 @@ export class TextEmbedder {
   }
 
   private async embedPreparedBatchWithSiliconFlow(texts: string[]): Promise<Float32Array[]> {
-    const response = await this.fetchWithRetry(SILICONFLOW_EMBEDDING_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.apiKey!}`,
-      },
-      body: JSON.stringify({
-        model: this.modelId,
-        input: texts,
-        encoding_format: 'float',
-      }),
-    });
+    // SiliconFlow returns 400 (code 20015 "The parameter is invalid") when an
+    // input exceeds bge-m3's 8192-token cap, AND its documented `truncate`
+    // field is not actually implemented for bge-m3 (probed: accepted on short
+    // inputs but doesn't truncate oversized ones). BPE-vs-SentencePiece
+    // tokenizer architectures differ by up to 40%, so any client-side
+    // estimator (tiktoken etc.) is either inaccurate or heavy.
+    //
+    // Self-healing fix: on the specific 400+20015 response, shrink every
+    // text in the batch by 10% (cap at the longest text's new length) and
+    // retry. Loop converges in O(log_{1/0.9}) attempts for any input
+    // density. Other 400s (auth, bad model) pass through to the caller.
+    const MIN_TEXT_LENGTH = 100;
+    const MAX_SHRINK_ATTEMPTS = 40;
+    let current = texts;
+    let attempt = 0;
 
-    if (!response.ok) {
-      throw new Error(await this.formatApiErrorMessage('SiliconFlow', response));
+    while (true) {
+      const response = await this.fetchWithRetry(SILICONFLOW_EMBEDDING_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey!}`,
+        },
+        body: JSON.stringify({
+          model: this.modelId,
+          input: current,
+          encoding_format: 'float',
+        }),
+      });
+
+      if (response.ok) {
+        return this.parseOpenAICompatibleResponse(response, 'SiliconFlow', current.length);
+      }
+
+      const errBody = await response.text().catch(() => '');
+      const isTokenLimit = response.status === 400 && /"code"\s*:\s*20015/.test(errBody);
+      const longest = current.reduce((m, t) => Math.max(m, t.length), 0);
+
+      if (!isTokenLimit || attempt >= MAX_SHRINK_ATTEMPTS || longest <= MIN_TEXT_LENGTH) {
+        throw new Error(this.buildSiliconFlowErrorMessage(response, errBody));
+      }
+
+      const newMax = Math.max(MIN_TEXT_LENGTH, Math.floor(longest * 0.9));
+      current = current.map((t) => (t.length > newMax ? t.slice(0, newMax) : t));
+      attempt++;
+      this.reportShrinkRetry(newMax, attempt);
     }
+  }
 
-    return this.parseOpenAICompatibleResponse(response, 'SiliconFlow', texts.length);
+  private buildSiliconFlowErrorMessage(response: Response, body: string): string {
+    const normalized = this.normalizeErrorBody(body);
+    const status = response.statusText
+      ? `${response.status} ${response.statusText}`
+      : String(response.status);
+    return `SiliconFlow embedding request failed (${status}): ${normalized || 'No response body'}`;
   }
 
   private async parseOpenAICompatibleResponse(
@@ -512,6 +529,15 @@ export class TextEmbedder {
       phase: 'retry_wait',
       provider: this.getProviderDisplayName(),
       retryInMs,
+      attempt,
+    });
+  }
+
+  private reportShrinkRetry(shrunkToChars: number, attempt: number): void {
+    this.statusReporter?.({
+      phase: 'shrink_retry',
+      provider: 'SiliconFlow',
+      shrunkToChars,
       attempt,
     });
   }
