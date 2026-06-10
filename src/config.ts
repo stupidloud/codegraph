@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import picomatch from 'picomatch';
 import { CodeGraphConfig, DEFAULT_CONFIG, LANGUAGES, NodeKind } from './types';
+import { getCodeGraphDir } from './directory';
 import { normalizePath } from './utils';
 
 /**
@@ -19,7 +20,7 @@ export const CONFIG_FILENAME = 'config.json';
  * Get the config file path for a project
  */
 export function getConfigPath(projectRoot: string): string {
-  return path.join(projectRoot, '.codegraph', CONFIG_FILENAME);
+  return path.join(getCodeGraphDir(projectRoot), CONFIG_FILENAME);
 }
 
 /**

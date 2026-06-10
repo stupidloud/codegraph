@@ -29,7 +29,7 @@
 
 **The CodeGraph platform is coming** — for every PR, know exactly what to test, what could break, which flows are affected, and whether business logic is compromised.
 
-<a href="https://getcodegraph.com"><img alt="Join the waitlist for early beta access" src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/waitlist.svg" height="44"></a>
+<a href="https://getcodegraph.com"><img alt="Join the waitlist for early beta access" src="https://raw.githubusercontent.com/colbymchenry/codegraph/main/assets/waitlist.svg?v=2" height="52"></a>
 
 <sub>Get <b>early beta access</b> to the hosted product · <a href="https://getcodegraph.com">getcodegraph.com</a></sub>
 
@@ -55,6 +55,8 @@ npm i -g @stupidloud/codegraph
 ```
 
 <sub>CodeGraph bundles its own runtime — nothing to compile, no native build, works the same everywhere. The installer puts `codegraph` on your PATH but **doesn't change your current shell** — open a new terminal before the next step so the command resolves.</sub>
+
+<sub>**Upgrade any time** with `codegraph upgrade` — it detects how you installed (bundle, npm, or npx) and updates in place. Add `--check` to see if an update is available, or `codegraph upgrade <version>` to pin one.</sub>
 
 ### 2. Wire up your agent(s)
 
@@ -464,6 +466,7 @@ codegraph callees <symbol>        # Find what a function/method calls (--limit, 
 codegraph impact <symbol>         # Analyze what code is affected by changing a symbol (--depth, --json)
 codegraph affected [files...]     # Find test files affected by changes (see below)
 codegraph serve --mcp             # Start MCP server
+codegraph upgrade [version]       # Update to the latest release (--check, --force)
 ```
 
 ### `codegraph affected`
@@ -635,6 +638,36 @@ is written):
 | Lua | `.lua` | Full support (functions, methods with receivers, local variables, `require` imports, call edges) |
 | Luau | `.luau` | Full support (everything in Lua, plus `type`/`export type` aliases, typed signatures, and Roblox instance-path `require`) |
 
+## Measured cross-file coverage
+
+Impact and blast-radius queries are only as good as the dependency graph behind them, so coverage is measured rather than asserted. **Fair coverage** = the share of symbol-bearing source files that have at least one *resolved cross-file dependent* — something that imports, calls, references, or (through a framework convention) routes to them — on a real-world benchmark repo per language. The residual is always a genuine static-analysis frontier (runtime dynamic dispatch, reflection / DI containers, framework-convention entry points, vendored third-party code), never hidden by gaming the denominator.
+
+| Language | Benchmark repo | Coverage |
+|---|---|---|
+| TypeScript / JavaScript | this repo | 95.8% |
+| Python | psf/requests | 100% |
+| Go | gin-gonic/gin | 96.6% |
+| Rust | BurntSushi/ripgrep | 86.7% |
+| Java | google/gson | 93.3% |
+| C# | jbogard/MediatR | 85.2% |
+| PHP | guzzle/guzzle | 100% |
+| Ruby | sidekiq/sidekiq | 100% |
+| C | redis/redis | 92.2% |
+| C++ | google/leveldb | 94.8% |
+| Objective-C | SDWebImage | 91.6% |
+| Swift | Alamofire | 95.3% |
+| Kotlin | square/okhttp | 96.2% |
+| Scala | gatling/gatling | 91.2% |
+| Dart | flutter/packages | 92.4% |
+| Svelte / SvelteKit | sveltejs/realworld | 100% |
+| Vue / Nuxt | nuxt/movies | 93.5% |
+| Lua | nvim-telescope/telescope.nvim | 84.2% |
+| Luau | dphfox/Fusion | 92.2% |
+| Liquid | Shopify/dawn | 73.8% |
+| Pascal / Delphi | PascalCoin | 75.7% |
+
+Framework routing is validated the same way, on a canonical app per framework: Express 100%, FastAPI 98%, Flask 100%, NestJS 96.8%, Gin 96.5%, Axum 100%, Rocket 93.8%, Vapor 100%, Laravel 92%, Rails 89.6%, React Router 100% — and the convention/reflection-heavy ones at their honest static-analysis ceiling: ASP.NET 83.9%, Spring 83.3%, Drupal 78.9%, Django 74.1%.
+
 ## Troubleshooting
 
 **"CodeGraph not initialized"** — Run `codegraph init` in your project directory first.
@@ -649,6 +682,8 @@ is written):
 **MCP server not connecting** — Ensure the project is initialized/indexed, verify the path in your MCP config, and check that `codegraph serve --mcp` works from the command line.
 
 **Missing symbols** — The MCP server auto-syncs on save (wait a couple seconds). Run `codegraph sync` manually if needed. Check that the file's language is supported and isn't inside a `.gitignore`d or default-excluded directory (e.g. `node_modules`, `dist`).
+
+**Sharing one checkout between Windows and WSL** — Don't point both at the same `.codegraph/`: the background-server lock and the SQLite index are tied to the OS that wrote them, and SQLite locking across the WSL2/Windows filesystem boundary is unreliable. Give each side its own index in the same tree by setting `CODEGRAPH_DIR` to a distinct name on one of them — e.g. `CODEGRAPH_DIR=.codegraph-win` on Windows, leaving WSL on the default `.codegraph`. CodeGraph skips any sibling `.codegraph-*` directory when indexing and watching, so the two never trip over each other.
 
 ## Star History
 

@@ -51,6 +51,10 @@ import { probeSqliteVss } from './vectors/sqlite-vss-probe';
 import { ContextBuilder, createContextBuilder } from './context';
 import { Mutex, FileLock } from './utils';
 import { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
+import { EXTRACTION_VERSION } from './extraction/extraction-version';
+import { getCodeGraphDir } from './directory';
+import { deriveProjectNameTokens } from './search/query-utils';
+import { CodeGraphPackageVersion } from './mcp/version';
 
 // Re-export types for consumers
 export * from './types';
@@ -164,8 +168,15 @@ export class CodeGraph {
     this.queries = queries;
     this.config = config;
     this.projectRoot = projectRoot;
+    // Down-weight the project name as a query term in search ranking — it names
+    // the whole repo, not a symbol, so it has no discriminative value (#720).
+    try {
+      this.queries.setProjectNameTokens(deriveProjectNameTokens(projectRoot));
+    } catch {
+      // Best-effort: ranking still works without it.
+    }
     this.fileLock = new FileLock(
-      path.join(projectRoot, '.codegraph', 'codegraph.lock')
+      path.join(getCodeGraphDir(projectRoot), 'codegraph.lock')
     );
     this.orchestrator = new ExtractionOrchestrator(projectRoot, queries);
     this.resolver = createResolver(projectRoot, queries);
@@ -465,6 +476,12 @@ export class CodeGraph {
               total,
             });
           });
+
+          // Second pass: chained calls whose method lives on a supertype the
+          // receiver conforms to (protocol-extension / inherited / default-
+          // interface). Needs the implements/extends edges the main pass just
+          // built, so it runs after resolution (#750).
+          this.resolver.resolveChainedCallsViaConformance();
         }
 
         if (result.success && this.isSemanticSearchEnabled()) {
@@ -484,6 +501,18 @@ export class CodeGraph {
           const after = this.queries.getNodeAndEdgeCount();
           result.nodesCreated = after.nodes - before.nodes;
           result.edgesCreated = after.edges - before.edges;
+        }
+
+        // Stamp the index with the engine that built it, so `codegraph status`
+        // and `codegraph upgrade` can recommend a re-index when the running
+        // engine produces richer extraction than the one on disk. Only on a
+        // real full index — a sync touches a subset, so it must NOT advance the
+        // extraction stamp (the bulk would still be stale). See extraction-version.ts.
+        if (result.success && result.filesIndexed > 0) {
+          try {
+            this.queries.setMetadata('indexed_with_version', CodeGraphPackageVersion);
+            this.queries.setMetadata('indexed_with_extraction_version', String(EXTRACTION_VERSION));
+          } catch { /* metadata is advisory — never fail an index over it */ }
         }
 
         return result;
@@ -573,6 +602,11 @@ export class CodeGraph {
               });
             });
           }
+
+          // Second pass: chained calls whose method lives on a supertype the
+          // receiver conforms to (protocol-extension / inherited). Needs the
+          // implements/extends edges built above (#750).
+          this.resolver.resolveChainedCallsViaConformance();
         }
 
         if (this.isSemanticSearchEnabled()) {
@@ -741,6 +775,32 @@ export class CodeGraph {
   }
 
   /**
+   * Which engine built the current index: the package version + extraction
+   * version stamped at the last full `indexAll`. Either field is null for an
+   * index built before stamping existed (treated as stale). See
+   * `extraction-version.ts` and `isIndexStale()`.
+   */
+  getIndexBuildInfo(): { version: string | null; extractionVersion: number | null } {
+    const version = this.queries.getMetadata('indexed_with_version');
+    const ev = this.queries.getMetadata('indexed_with_extraction_version');
+    const parsed = ev != null ? parseInt(ev, 10) : NaN;
+    return { version, extractionVersion: Number.isFinite(parsed) ? parsed : null };
+  }
+
+  /**
+   * True when the on-disk index was built by an engine whose extraction is
+   * older than the one now running — i.e. a re-index would add data a migration
+   * can't backfill. False when there's no index yet (nothing to refresh) or the
+   * stamp is current. This is the signal behind `codegraph status`'s re-index
+   * hint and `codegraph upgrade`'s reminder.
+   */
+  isIndexStale(): boolean {
+    if (this.queries.getLastIndexedAt() == null) return false;
+    const { extractionVersion } = this.getIndexBuildInfo();
+    return extractionVersion == null || extractionVersion < EXTRACTION_VERSION;
+  }
+
+  /**
    * Extract nodes and edges from source code (without storing)
    */
   extractFromSource(filePath: string, source: string): ExtractionResult {
@@ -859,6 +919,17 @@ export class CodeGraph {
    */
   searchNodes(query: string, options?: SearchOptions): SearchResult[] {
     return this.queries.searchNodes(query, options);
+  }
+
+  /**
+   * Normalized project-name tokens (go.mod / package.json / repo dir) used to
+   * down-weight the non-discriminative project name in search ranking (#720).
+   * Exposed so explore can exclude it from the PascalCase type-disambiguation
+   * bias, which would otherwise pull overloaded tokens toward whichever stack
+   * embeds the project name.
+   */
+  getProjectNameTokens(): Set<string> {
+    return this.queries.getProjectNameTokens();
   }
 
   /**
