@@ -366,10 +366,10 @@ export class TextEmbedder {
     //
     // Self-healing fix: on the specific 400+20015 response, shrink every
     // text in the batch by 10% (cap at the longest text's new length) and
-    // retry. Loop converges in O(log_{1/0.9}) attempts for any input
-    // density. Other 400s (auth, bad model) pass through to the caller.
+    // retry. Convergence is guaranteed by clamping newMax to MIN_TEXT_LENGTH
+    // — once longest hits 100 chars and still 20015s, we give up. Other 400s
+    // (auth, bad model) pass through to the caller.
     const MIN_TEXT_LENGTH = 100;
-    const MAX_SHRINK_ATTEMPTS = 40;
     let current = texts;
     let attempt = 0;
 
@@ -395,7 +395,7 @@ export class TextEmbedder {
       const isTokenLimit = response.status === 400 && /"code"\s*:\s*20015/.test(errBody);
       const longest = current.reduce((m, t) => Math.max(m, t.length), 0);
 
-      if (!isTokenLimit || attempt >= MAX_SHRINK_ATTEMPTS || longest <= MIN_TEXT_LENGTH) {
+      if (!isTokenLimit || longest <= MIN_TEXT_LENGTH) {
         throw new Error(this.buildSiliconFlowErrorMessage(response, errBody));
       }
 

@@ -8,6 +8,7 @@ const PHASE_NAMES: Record<string, string> = {
   resolving: 'Resolving refs',
   embedding: 'Generating embeddings',
   embedding_wait: 'Waiting for quota',
+  embedding_shrink: 'Shrinking oversized batch',
 };
 
 export interface IndexProgress {
@@ -42,7 +43,7 @@ export function createShimmerProgress(): ShimmerProgress {
       let percent = -1;
       let count = 0;
       let detail: string | undefined;
-      if (progress.phase === 'embedding_wait') {
+      if (progress.phase === 'embedding_wait' || progress.phase === 'embedding_shrink') {
         detail = progress.currentFile;
       }
       if (progress.total > 0) {

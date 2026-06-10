@@ -28,7 +28,7 @@ export interface EmbeddingProgress {
   nodeName?: string;
 
   /** Optional status for non-progress updates such as quota waits */
-  status?: 'embedding' | 'waiting';
+  status?: 'embedding' | 'waiting' | 'shrinking';
 
   /** Human-readable detail for the current status */
   detail?: string;
@@ -472,7 +472,7 @@ export class VectorManager {
       onProgress({
         current,
         total,
-        status: 'waiting',
+        status: 'shrinking',
         detail: `shrunk to ${status.shrunkToChars} chars (try ${status.attempt})`,
       });
     }

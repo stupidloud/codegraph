@@ -635,7 +635,12 @@ export class CodeGraph {
       total,
     });
     await this.generateEmbeddings((progress) => {
-      const phase = progress.status === 'waiting' ? 'embedding_wait' : 'embedding';
+      const phase =
+        progress.status === 'waiting'
+          ? 'embedding_wait'
+          : progress.status === 'shrinking'
+            ? 'embedding_shrink'
+            : 'embedding';
       onProgress?.({
         phase,
         current: progress.current,

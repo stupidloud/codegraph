@@ -53,7 +53,7 @@ const WORKER_RECYCLE_INTERVAL = 250;
  * Progress callback for indexing operations
  */
 export interface IndexProgress {
-  phase: 'scanning' | 'parsing' | 'storing' | 'resolving' | 'embedding' | 'embedding_wait';
+  phase: 'scanning' | 'parsing' | 'storing' | 'resolving' | 'embedding' | 'embedding_wait' | 'embedding_shrink';
   current: number;
   total: number;
   currentFile?: string;
