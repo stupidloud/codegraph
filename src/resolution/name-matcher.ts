@@ -603,9 +603,11 @@ export function matchScopedCallChain(
  * so a bare `Foo()` there is a method call, not construction — excluded. Scala's
  * `Foo(args)` is a case-class / companion `apply`, which conventionally returns
  * `Foo` — and resolveMethodOnType validates, so a non-conventional `apply` that
- * returns another type simply yields no edge rather than a wrong one.
+ * returns another type simply yields no edge rather than a wrong one. Pascal/Delphi:
+ * a `TFoo(x)` is a TYPECAST whose result is a `TFoo`, so `TFoo(x).method()` resolves
+ * the method on `TFoo` — same shape, same validation.
  */
-const CONSTRUCTS_VIA_BARE_CALL = new Set(['kotlin', 'swift', 'scala', 'dart']);
+const CONSTRUCTS_VIA_BARE_CALL = new Set(['kotlin', 'swift', 'scala', 'dart', 'pascal']);
 
 /**
  * Resolve a dotted chained call whose receiver is a static factory / fluent call —
@@ -673,7 +675,35 @@ export function matchDottedCallChain(
   const factoryMethod = inner.slice(lastDot + 1);
   if (!factoryClass || !factoryMethod) return null;
   const ret = lookupCalleeReturnType(`${factoryClass}::${factoryMethod}`, ref, context);
-  if (!ret) return null;
+  if (!ret) {
+    // Objective-C: a class-message factory — `[X alloc]`, `[X new]`,
+    // `[X sharedFoo]` — returns an instance of the RECEIVER class `X` by
+    // convention (`instancetype`). So when the factory's own return type isn't
+    // recoverable (its selector returns `instancetype`, or `alloc`/`new` aren't
+    // user-defined nodes at all), the receiver's type is the class `X` itself.
+    // This resolves the ubiquitous `[[X alloc] init]` and singleton chains.
+    // resolveMethodOnType validates against X (and its supertypes), so a class
+    // whose method actually lives elsewhere yields NO edge, not a wrong one — and
+    // crucially this does NOT fire when a concrete return type WAS captured but
+    // simply lacks the method (that already returned null above: absent-method
+    // safety, so a same-named decoy is still never matched).
+    if (ref.language === 'objc' && /^[A-Z]/.test(factoryClass)) {
+      return resolveMethodOnType(factoryClass, method, ref, context, 0.8, 'instance-method', importedFqnOf(factoryClass, ref, context));
+    }
+    // Pascal/Delphi: the extractor only re-encodes a `TFoo`/`IFoo`-prefixed chain
+    // (the type-naming convention), so `factoryClass` is always a real class here.
+    // A factory whose return type wasn't captured is a CONSTRUCTOR
+    // (`TFileMem.Create().SetCachePerformance` — `constructor Create` has no `:
+    // TBar` annotation but returns its own class) or an unannotated function. In
+    // both cases the receiver's type is the class itself, so resolve the method on
+    // `factoryClass`. resolveMethodOnType validates against it (and its
+    // supertypes), so a wrong inference yields no edge — and this never fires when
+    // a return type WAS captured but lacks the method (absent-method safety above).
+    if (ref.language === 'pascal' && /^[TI]/.test(factoryClass)) {
+      return resolveMethodOnType(factoryClass, method, ref, context, 0.8, 'instance-method', importedFqnOf(factoryClass, ref, context));
+    }
+    return null;
+  }
   return resolveMethodOnType(ret, method, ref, context, 0.85, 'instance-method', importedFqnOf(ret, ref, context));
 }
 
@@ -1123,11 +1153,12 @@ export function matchReference(
   }
 
   // 1d. Dotted chained static-factory / fluent call (Java / Kotlin / C# / Swift /
-  // Go / Scala / Dart) — `Foo.getInstance().bar()` encoded as `Foo.getInstance().bar`,
-  // Go's bare-factory `New().Method()` as `New().Method`, Scala's companion factory
-  // `Foo.create().bar()`, or Dart's static factory / factory-constructor
-  // `Foo.create().bar()` (#645/#608 mechanism). Resolve the method's class from the
-  // inner call's declared return type, then validate it.
+  // Go / Scala / Dart / Objective-C) — `Foo.getInstance().bar()` encoded as
+  // `Foo.getInstance().bar`, Go's bare-factory `New().Method()` as `New().Method`,
+  // Scala's companion factory, Dart's static factory / factory-constructor, or
+  // ObjC's chained message send `[[Foo create] doIt]` encoded as `Foo.create().doIt`
+  // (#645/#608 mechanism). Resolve the method's class from the inner call's
+  // declared return type, then validate it.
   if (
     ref.language === 'java' ||
     ref.language === 'kotlin' ||
@@ -1135,7 +1166,9 @@ export function matchReference(
     ref.language === 'swift' ||
     ref.language === 'go' ||
     ref.language === 'scala' ||
-    ref.language === 'dart'
+    ref.language === 'dart' ||
+    ref.language === 'objc' ||
+    ref.language === 'pascal'
   ) {
     result = matchDottedCallChain(ref, context);
     if (result) return result;
