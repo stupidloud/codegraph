@@ -4,10 +4,20 @@ type ClackPrompts = typeof import('@clack/prompts');
 
 /**
  * Ask whether to enable remote-provider-backed semantic search during project init.
+ *
+ * In non-interactive contexts (no TTY on stdin: piped input, CI, test
+ * harnesses, subprocess with stdio: 'ignore') we skip the prompt and return
+ * undefined — semantic search disabled by default. This matches the
+ * `initialValue: false` below and prevents `codegraph init` from hanging on a
+ * prompt nobody can answer.
  */
 export async function promptSemanticSearchConfig(
   clack: ClackPrompts
 ): Promise<Pick<CodeGraphConfig, 'semanticSearch'> | undefined> {
+  if (!process.stdin.isTTY) {
+    return undefined;
+  }
+
   const enableSemanticSearch = await clack.confirm({
     message: 'Enable semantic search with remote embeddings?',
     active: 'Yes',

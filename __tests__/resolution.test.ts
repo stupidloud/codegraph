@@ -581,12 +581,23 @@ from ..services import auth_service
         line: 10,
         column: 5,
         filePath: 'src/App.tsx',
-        language: 'typescript' as const,
+        // Refs extracted from .tsx files carry language 'tsx' — component
+        // resolution is gated to JSX-capable refs (#764: PascalCase TYPE refs
+        // from plain .ts files were resolving to arbitrary same-named classes).
+        language: 'tsx' as const,
       };
 
       const result = reactResolver!.resolve(ref, context);
       expect(result).not.toBeNull();
       expect(result?.targetNodeId).toBe('component:src/Button.tsx:Button:5');
+
+      // The same PascalCase name referenced from a plain .ts file is a TYPE
+      // reference, not a component usage — component resolution must decline
+      // and leave it to proximity-aware name matching (#764: a .ts GraphQL
+      // types file's own `Account` alias was losing to an arbitrary same-named
+      // class in another monorepo package).
+      const tsRef = { ...ref, filePath: 'src/models.ts', language: 'typescript' as const };
+      expect(reactResolver!.resolve(tsRef, context)).toBeNull();
     });
 
     it('should resolve custom hook references', () => {
@@ -755,6 +766,46 @@ def bootstrap():
         (e) => e.kind === 'calls' && e.target === instantiates!.target
       );
       expect(callsToUserService).toHaveLength(0);
+    });
+
+    it('resolves a cross-file static method call to the method, not the class (#825)', async () => {
+      // `Foo.bar()` where `Foo` is an imported class must link to the static
+      // method `Foo::bar`, NOT to the class `Foo`. Previously the import
+      // resolver dropped the `.bar` member and resolved to `Foo`, which the
+      // calls→instantiates promotion then turned into `run instantiates Foo`,
+      // leaving the static method with zero callers and a hollow impact radius.
+      fs.writeFileSync(
+        path.join(tempDir, 'helpers.ts'),
+        `export class Foo {\n  static bar(x: number) { return x + 1; }\n}\n`
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'caller.ts'),
+        `import { Foo } from './helpers';\nexport function run() { return Foo.bar(41); }\n`
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+
+      const bar = cg.getNodesByKind('method').find((n) => n.name === 'bar');
+      const foo = cg.getNodesByKind('class').find((n) => n.name === 'Foo');
+      const run = cg.getNodesByKind('function').find((n) => n.name === 'run');
+      expect(bar).toBeDefined();
+      expect(foo).toBeDefined();
+      expect(run).toBeDefined();
+
+      // `run` is reported as a caller of the static method `Foo.bar`.
+      const barCallers = cg.getCallers(bar!.id).map((c) => c.node.name);
+      expect(barCallers).toContain('run');
+
+      // And the call is NOT mis-promoted to `run instantiates Foo`.
+      const outgoing = cg.getOutgoingEdges(run!.id);
+      expect(
+        outgoing.filter((e) => e.kind === 'instantiates' && e.target === foo!.id)
+      ).toHaveLength(0);
+      // The real edge is a `calls` edge to the method.
+      expect(
+        outgoing.some((e) => e.kind === 'calls' && e.target === bar!.id)
+      ).toBe(true);
     });
 
     it('resolves Go cross-package qualified calls via go.mod module path (#388)', async () => {
@@ -1425,6 +1476,47 @@ func main() {
       expect(fooNode).toBeDefined();
       const callers = cg.getCallers(fooNode!.id);
       expect(callers.some((c) => c.node.filePath === 'src/Bar.svelte')).toBe(true);
+    });
+
+    it('links an .astro page to the component and TS util it uses (#768)', async () => {
+      // The canonical Astro shape: a page imports a layout/component in
+      // frontmatter and uses it as a template tag; the component's template
+      // calls an imported .ts util. Both hops must produce graph edges or
+      // an Astro project is invisible to callers/impact.
+      fs.mkdirSync(path.join(tempDir, 'src/components'), { recursive: true });
+      fs.mkdirSync(path.join(tempDir, 'src/utils'), { recursive: true });
+      fs.mkdirSync(path.join(tempDir, 'src/pages'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'src/utils/format.ts'),
+        `export function formatDate(d: Date): string { return d.toISOString(); }\n`
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'src/components/PostCard.astro'),
+        `---\nimport { formatDate } from '../utils/format';\nconst { date } = Astro.props;\n---\n<time>{formatDate(date)}</time>\n`
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'src/pages/index.astro'),
+        `---\nimport PostCard from '../components/PostCard.astro';\n---\n<PostCard date={new Date()} />\n`
+      );
+
+      cg = await CodeGraph.init(tempDir, { index: true });
+      cg.resolveReferences();
+
+      // Hop 1: page → component (template tag through the frontmatter import)
+      const cardNode = cg
+        .getNodesByKind('component')
+        .find((n) => n.name === 'PostCard' && n.filePath === 'src/components/PostCard.astro');
+      expect(cardNode).toBeDefined();
+      const cardCallers = cg.getCallers(cardNode!.id);
+      expect(cardCallers.some((c) => c.node.filePath === 'src/pages/index.astro')).toBe(true);
+
+      // Hop 2: component template call → .ts util
+      const fmtNode = cg
+        .getNodesByKind('function')
+        .find((n) => n.name === 'formatDate' && n.filePath === 'src/utils/format.ts');
+      expect(fmtNode).toBeDefined();
+      const fmtCallers = cg.getCallers(fmtNode!.id);
+      expect(fmtCallers.some((c) => c.node.filePath === 'src/components/PostCard.astro')).toBe(true);
     });
 
     it('resolves a bare directory import (import { x } from "." / "./") to index.ts (#629)', async () => {

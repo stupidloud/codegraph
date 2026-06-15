@@ -482,6 +482,9 @@ export class CodeGraph {
           // interface). Needs the implements/extends edges the main pass just
           // built, so it runs after resolution (#750).
           this.resolver.resolveChainedCallsViaConformance();
+          // Same lifecycle for `this.<member>` callback registrations whose
+          // member is inherited from a supertype (#808).
+          this.resolver.resolveDeferredThisMemberRefs();
         }
 
         if (result.success && this.isSemanticSearchEnabled()) {
@@ -607,6 +610,9 @@ export class CodeGraph {
           // receiver conforms to (protocol-extension / inherited). Needs the
           // implements/extends edges built above (#750).
           this.resolver.resolveChainedCallsViaConformance();
+          // Same lifecycle for `this.<member>` callback registrations whose
+          // member is inherited from a supertype (#808).
+          this.resolver.resolveDeferredThisMemberRefs();
         }
 
         if (this.isSemanticSearchEnabled()) {
@@ -736,6 +742,23 @@ export class CodeGraph {
    */
   isWatching(): boolean {
     return this.watcher?.isActive() ?? false;
+  }
+
+  /**
+   * True once live watching has permanently degraded (OS watch-resource
+   * exhaustion, or a write lock held past the retry budget) and auto-sync is
+   * disabled until the next {@link watch} call. Distinct from `!isWatching()`:
+   * a stopped/never-started watcher is inactive but NOT degraded. MCP tools use
+   * this to surface a whole-index "results may be stale" notice, since
+   * `getPendingFiles()` goes empty once watching stops (#876).
+   */
+  isWatcherDegraded(): boolean {
+    return this.watcher?.isDegraded() ?? false;
+  }
+
+  /** The reason live watching degraded, or null if it is healthy (#876). */
+  getWatcherDegradedReason(): string | null {
+    return this.watcher?.getDegradedReason() ?? null;
   }
 
   /**

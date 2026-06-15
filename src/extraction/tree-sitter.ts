@@ -17,11 +17,14 @@ import {
 } from '../types';
 import { getParser, detectLanguage, isLanguageSupported, isFileLevelOnlyLanguage } from './grammars';
 import { generateNodeId, getNodeText, getChildByField, getPrecedingDocstring } from './tree-sitter-helpers';
+import { FN_REF_SPECS, captureFnRefCandidates, type FnRefSpec, type FnRefCandidate } from './function-ref';
+import { isGeneratedFile } from './generated-detection';
 import type { LanguageExtractor, ExtractorContext } from './tree-sitter-types';
 import { EXTRACTORS } from './languages';
 import { LiquidExtractor } from './liquid-extractor';
 import { RazorExtractor } from './razor-extractor';
 import { SvelteExtractor } from './svelte-extractor';
+import { AstroExtractor } from './astro-extractor';
 import { DfmExtractor } from './dfm-extractor';
 import { VueExtractor } from './vue-extractor';
 import { MyBatisExtractor } from './mybatis-extractor';
@@ -218,16 +221,30 @@ export class TreeSitterExtractor {
   private nodes: Node[] = [];
   private edges: Edge[] = [];
   private unresolvedReferences: UnresolvedReference[] = [];
+  // Value-reference edges (default ON; set CODEGRAPH_VALUE_REFS=0 to disable; see flushValueRefs).
+  // Same-file reads of file-scope const/var symbols → `references` edges so impact analysis catches
+  // value consumers ("change this constant/table, affect its readers").
+  private static readonly VALUE_REF_LANGS = new Set<string>(['typescript', 'javascript', 'tsx']);
+  private static readonly MAX_VALUE_REF_NODES = 20_000;
+  private readonly valueRefsEnabled = process.env.CODEGRAPH_VALUE_REFS !== '0';
+  private fileScopeValues = new Map<string, string>();
+  private valueRefScopes: Array<{ id: string; node: SyntaxNode }> = [];
   private errors: ExtractionError[] = [];
   private extractor: LanguageExtractor | null = null;
   private nodeStack: string[] = []; // Stack of parent node IDs
   private methodIndex: Map<string, string> | null = null; // lookup key → node ID for Pascal defProc lookup
+  // Function-as-value capture (#756): per-language spec + candidates collected
+  // during the walk, gated & flushed into unresolvedReferences at end-of-file
+  // (see flushFnRefCandidates).
+  private fnRefSpec: FnRefSpec | undefined;
+  private fnRefCandidates: Array<FnRefCandidate & { fromNodeId: string }> = [];
 
   constructor(filePath: string, source: string, language?: Language) {
     this.filePath = filePath;
     this.source = source;
     this.language = language || detectLanguage(filePath, source);
     this.extractor = EXTRACTORS[this.language] || null;
+    this.fnRefSpec = FN_REF_SPECS[this.language];
   }
 
   /**
@@ -314,6 +331,11 @@ export class TreeSitterExtractor {
 
       this.visitNode(this.tree.rootNode);
 
+      // Gate + flush function-as-value candidates (#756) while the file's
+      // nodes and import refs are complete and the file node is still pushed.
+      this.flushFnRefCandidates();
+      this.flushValueRefs();
+
       if (packageNodeId) this.nodeStack.pop();
       this.nodeStack.pop();
     } catch (error) {
@@ -353,6 +375,247 @@ export class TreeSitterExtractor {
   }
 
   /**
+   * Function-as-value capture (#756): if this node is one of the language's
+   * value-position containers (call arguments, assignment RHS, struct/object
+   * initializer, array/table literal), collect candidate function names from
+   * it. Candidates are gated & flushed at end-of-file (flushFnRefCandidates).
+   */
+  private maybeCaptureFnRefs(node: SyntaxNode, nodeType: string): void {
+    const spec = this.fnRefSpec;
+    if (!spec) return;
+    const rule = spec.dispatch.get(nodeType);
+    if (!rule || this.nodeStack.length === 0) return;
+    const fromNodeId = this.nodeStack[this.nodeStack.length - 1];
+    if (!fromNodeId) return;
+    for (const cand of captureFnRefCandidates(node, rule, spec, this.source)) {
+      this.fnRefCandidates.push({ ...cand, fromNodeId });
+    }
+  }
+
+  /**
+   * Candidates-only scan of a subtree the main walkers won't traverse
+   * (top-level variable initializers). No extraction side effects. Halts at
+   * nested function definitions: their bodies are walked — and their
+   * candidates attributed — by extractFunction's own body walk.
+   */
+  private scanFnRefSubtree(node: SyntaxNode, depth: number): void {
+    if (!this.fnRefSpec || depth > 12) return;
+    const nodeType = node.type;
+    if (depth > 0 && (
+      this.extractor?.functionTypes.includes(nodeType) ||
+      nodeType === 'arrow_function' ||
+      nodeType === 'function_expression' ||
+      nodeType === 'lambda_literal' ||
+      nodeType === 'lambda_expression'
+    )) {
+      return;
+    }
+    this.maybeCaptureFnRefs(node, nodeType);
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (child) this.scanFnRefSubtree(child, depth + 1);
+    }
+  }
+
+  /**
+   * Gate captured function-as-value candidates and push survivors as
+   * `function_ref` unresolved references.
+   *
+   * The gate bounds volume and protects precision: a candidate survives only
+   * if its name matches a function/method DEFINED IN THIS FILE or a name this
+   * file imports/references. Everything else (locals, params, fields passed
+   * as arguments) is dropped before it ever reaches the database. Resolution
+   * then matches survivors against function/method nodes only
+   * (matchFunctionRef) and emits `references` edges — which callers/impact
+   * already traverse.
+   *
+   * Known v1 limit, deliberate: a C/C++ callback registered in a DIFFERENT
+   * translation unit than its definition (extern, no symbol imports to match)
+   * is not captured. Same-file registration — the dominant C pattern (static
+   * callback + same-file ops struct) — is.
+   */
+  private flushFnRefCandidates(): void {
+    if (this.fnRefCandidates.length === 0) return;
+    const candidates = this.fnRefCandidates;
+    this.fnRefCandidates = [];
+
+    // Generated/minified files (vendored jquery.min.js and friends): their
+    // function-as-value edges are noise — single-letter minified symbols
+    // resolve everywhere. Same policy as the callback synthesizer.
+    if (isGeneratedFile(this.filePath)) return;
+
+    const definedHere = new Set<string>();
+    for (const n of this.nodes) {
+      if (n.kind === 'function' || n.kind === 'method') definedHere.add(n.name);
+    }
+
+    // Import-binding names only (all binding emitters push kind 'imports').
+    // Deliberately NOT 'references': those carry type-annotation and
+    // interface-member names, which let local variables that share a type
+    // member's name slip through the gate (excalidraw A/B finding). A dotted
+    // import (JVM `import com.example.OtherClass`) also contributes its LAST
+    // segment — the simple name Java/Kotlin code uses in `OtherClass::method`
+    // references.
+    const SIMPLE_NAME = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+    // JVM imports are dotted (`com.example.OtherClass`); PHP `use` imports
+    // are backslashed (`App\Services\Mailer`). Both contribute their last
+    // segment — the simple name code uses to reference them.
+    const QUALIFIED_IMPORT = /^[A-Za-z_$][A-Za-z0-9_$.\\]*[.\\]([A-Za-z_$][A-Za-z0-9_$]*)$/;
+    const importedNames = new Set<string>();
+    for (const r of this.unresolvedReferences) {
+      if (r.referenceKind !== 'imports') continue;
+      if (SIMPLE_NAME.test(r.referenceName)) {
+        importedNames.add(r.referenceName);
+      } else {
+        const qualified = r.referenceName.match(QUALIFIED_IMPORT);
+        if (qualified) importedNames.add(qualified[1]!);
+      }
+    }
+
+    const ungated = this.fnRefSpec?.ungatedModes;
+    const addressOfOnly = this.fnRefSpec?.addressOfOnly === true;
+    const seen = new Set<string>();
+    for (const c of candidates) {
+      const atFileScope = c.fromNodeId.startsWith('file:');
+      // C++ (addressOfOnly): a BARE identifier qualifies only inside a
+      // file-scope initializer table. Everywhere else — args, assignments,
+      // local braced-init lists like `{begin, size}` — only explicit `&`
+      // forms count (fmt A/B finding: generic names `begin`/`out`/`size`
+      // collide with locals and members).
+      if (
+        addressOfOnly &&
+        !c.explicitRef &&
+        !(atFileScope && (c.mode === 'value' || c.mode === 'list'))
+      ) {
+        continue;
+      }
+      // Gate policy by candidate shape:
+      //  - `this.<member>`: ALWAYS flush — the member may be inherited from a
+      //    class in another file (definedHere can't see it), volume is
+      //    naturally bounded by real `this.X` expressions, and resolution is
+      //    strictly class-scoped (own members or the validated supertype
+      //    pass), so nothing fuzzy can leak.
+      //  - `Scope::member` (C++ member-pointers, Java/Kotlin type-qualified
+      //    method refs, PHP `'Cls::m'`): ALWAYS flush — the explicit-ref
+      //    syntax is self-selecting, the referenced type often needs NO
+      //    import (Java/Kotlin same-package, Kotlin companions), and
+      //    resolution is scope-suffix-anchored + unique-or-drop, so a
+      //    same-named member on another class can't match.
+      //  - C-family file-scope initializers skip the gate entirely
+      //    (constant-expression context — see FnRefSpec.ungatedModes).
+      //  - everything else: name ∈ same-file functions/methods ∪ imports.
+      if (!c.name.startsWith('this.') && !c.name.includes('::')) {
+        const skipGate =
+          (ungated?.has(c.mode) === true && atFileScope) ||
+          c.skipGate === true; // PHP HOF-position string callables (see FnRefCandidate.skipGate)
+        if (!skipGate && !definedHere.has(c.name) && !importedNames.has(c.name)) {
+          continue;
+        }
+      }
+      const key = `${c.fromNodeId}|${c.name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      this.unresolvedReferences.push({
+        fromNodeId: c.fromNodeId,
+        referenceName: c.name,
+        referenceKind: 'function_ref',
+        line: c.line,
+        column: c.column,
+      });
+    }
+  }
+
+  /**
+   * Record value-reference bookkeeping as nodes are created: file-scope const/var symbols with
+   * distinctive names become reference targets; function/method/const/var symbols become reader
+   * scopes whose bodies flushValueRefs scans.
+   */
+  private captureValueRefScope(kind: NodeKind, name: string, id: string, node: SyntaxNode): void {
+    if ((kind === 'constant' || kind === 'variable') && name.length >= 3 && /[A-Z_]/.test(name)) {
+      const parentId = this.nodeStack[this.nodeStack.length - 1];
+      if (parentId?.startsWith('file:')) this.fileScopeValues.set(name, id);
+    }
+    if (kind === 'function' || kind === 'method' || kind === 'constant' || kind === 'variable') {
+      this.valueRefScopes.push({ id, node });
+    }
+  }
+
+  /**
+   * Emit same-file `references` edges from a symbol to the file-scope const/var it reads (TS/JS).
+   * The engine doesn't edge const→consumer, so impact analysis misses "change this table, affect
+   * its readers" (the ReScript-PR false positive). Same-file only (resolution is unambiguous),
+   * distinctive target names only (dodges the local-shadowing precision trap documented on
+   * function_ref), deduped per (reader, target). Default on (CODEGRAPH_VALUE_REFS=0 disables) +
+   * additive. Shadowed targets are pruned — see below.
+   */
+  private flushValueRefs(): void {
+    const scopes = this.valueRefScopes;
+    const targets = this.fileScopeValues;
+    this.valueRefScopes = [];
+    this.fileScopeValues = new Map();
+    if (!this.valueRefsEnabled || !TreeSitterExtractor.VALUE_REF_LANGS.has(this.language)) return;
+    if (targets.size === 0 || scopes.length === 0 || isGeneratedFile(this.filePath)) return;
+
+    // Prune SHADOWED targets. A name bound more than once in the file (e.g. a
+    // bundled/Emscripten `const Module` re-declared as an inner `var Module` /
+    // function param) resolves to the INNER binding for nested readers, so a
+    // file-scope edge to it is a false positive. Those inner re-declarations
+    // aren't extracted as graph nodes, so detect them at the syntax level:
+    // count `variable_declarator` names across the tree and drop any target
+    // bound twice or more. Single-binding (unambiguous) names are kept. This
+    // complements the path-based isGeneratedFile() check for content-minified
+    // bundles it can't catch by suffix.
+    if (this.tree) {
+      const declCounts = new Map<string, number>();
+      const dstack: SyntaxNode[] = [this.tree.rootNode];
+      let dvisited = 0;
+      while (dstack.length > 0 && dvisited < TreeSitterExtractor.MAX_VALUE_REF_NODES) {
+        const n = dstack.pop()!;
+        dvisited++;
+        if (n.type === 'variable_declarator') {
+          const nameNode = n.namedChild(0);
+          if (nameNode && nameNode.type === 'identifier') {
+            const nm = getNodeText(nameNode, this.source);
+            if (targets.has(nm)) declCounts.set(nm, (declCounts.get(nm) ?? 0) + 1);
+          }
+        }
+        for (let i = 0; i < n.namedChildCount; i++) {
+          const c = n.namedChild(i);
+          if (c) dstack.push(c);
+        }
+      }
+      for (const [nm, c] of declCounts) if (c > 1) targets.delete(nm);
+      if (targets.size === 0) return;
+    }
+
+    for (const scope of scopes) {
+      const seen = new Set<string>();
+      const stack: SyntaxNode[] = [scope.node];
+      let visited = 0;
+      while (stack.length > 0 && visited < TreeSitterExtractor.MAX_VALUE_REF_NODES) {
+        const n = stack.pop()!;
+        visited++;
+        if (n.type === 'identifier') {
+          const targetId = targets.get(getNodeText(n, this.source));
+          if (targetId && targetId !== scope.id && !seen.has(targetId)) {
+            seen.add(targetId);
+            this.edges.push({
+              source: scope.id,
+              target: targetId,
+              kind: 'references',
+              metadata: { valueRef: true },
+            });
+          }
+        }
+        for (let i = 0; i < n.namedChildCount; i++) {
+          const c = n.namedChild(i);
+          if (c) stack.push(c);
+        }
+      }
+    }
+  }
+
+  /**
    * Visit a node and extract information
    */
   private visitNode(node: SyntaxNode): void {
@@ -365,7 +628,14 @@ export class TreeSitterExtractor {
     if (this.extractor.visitNode) {
       const ctx = this.makeExtractorContext();
       const handled = this.extractor.visitNode(node, ctx);
-      if (handled) return;
+      if (handled) {
+        // The hook consumed this subtree, so the walkers below never descend
+        // into it — scan it for function-as-value candidates (#756). Scala's
+        // hook handles val/var definitions (`val table = Seq(targetCb)`), for
+        // example. The scan is capture-only and halts at nested functions.
+        this.scanFnRefSubtree(node, 0);
+        return;
+      }
     }
 
     // Pascal-specific AST handling
@@ -373,6 +643,11 @@ export class TreeSitterExtractor {
       skipChildren = this.visitPascalNode(node);
       if (skipChildren) return;
     }
+
+    // Function-as-value capture (#756) — independent of the dispatch ladder
+    // below (the captured container types have no other handler there), so it
+    // can never shadow or be shadowed by an extraction branch.
+    this.maybeCaptureFnRefs(node, nodeType);
 
     // Check for function declarations
     // For Python/Ruby, function_definition inside a class should be treated as method
@@ -410,8 +685,30 @@ export class TreeSitterExtractor {
     }
     // Check for method declarations (only if not already handled by functionTypes)
     else if (this.extractor.methodTypes.includes(nodeType)) {
-      this.extractMethod(node);
-      skipChildren = true; // extractMethod visits children via visitFunctionBody
+      // TS/JS class fields parse as a methodTypes node; only function-valued
+      // fields are methods — a plain field (`public fonts: Fonts;`) is a
+      // property (#808). classifyMethodNode is absent for other languages.
+      if (this.extractor.classifyMethodNode?.(node) === 'property') {
+        const propNode = this.extractProperty(node);
+        // Walk the initializer so its calls/instantiations attribute to the
+        // property (`history = createHistory()` → history calls
+        // createHistory). The old field-as-method path never walked these
+        // (resolveBody only resolves function bodies), so this is additive.
+        const valueNode = getChildByField(node, 'value');
+        if (propNode && valueNode) {
+          this.nodeStack.push(propNode.id);
+          this.visitFunctionBody(valueNode, '');
+          this.nodeStack.pop();
+        }
+        // A field initializer can also register callbacks
+        // (`static handlers = { click: onClick }`) — scan it for
+        // function-as-value candidates (capture-only, halts at functions).
+        this.scanFnRefSubtree(node, 0);
+        skipChildren = true;
+      } else {
+        this.extractMethod(node);
+        skipChildren = true; // extractMethod visits children via visitFunctionBody
+      }
     }
     // Check for interface/protocol/trait declarations
     else if (this.extractor.interfaceTypes.includes(nodeType)) {
@@ -437,17 +734,33 @@ export class TreeSitterExtractor {
     // Check for class properties (e.g. C# property_declaration)
     else if (this.extractor.propertyTypes?.includes(nodeType) && this.isInsideClassLikeNode()) {
       this.extractProperty(node);
+      // Property initializers aren't walked — scan for function-as-value
+      // candidates (#756): Scala `val table = Seq(targetCb)` in an object,
+      // Kotlin `val cb = ::handler` class properties.
+      this.scanFnRefSubtree(node, 0);
       skipChildren = true;
     }
     // Check for class fields (e.g. Java field_declaration, C# field_declaration)
     else if (this.extractor.fieldTypes?.includes(nodeType) && this.isInsideClassLikeNode()) {
       this.extractField(node);
+      // Field initializers aren't walked — scan for function-as-value
+      // candidates (#756): Java `List<IntConsumer> table = List.of(Main::cb)`,
+      // C# `List<Action<int>> table = new() { TargetCb }`.
+      this.scanFnRefSubtree(node, 0);
       skipChildren = true;
     }
     // Check for variable declarations (const, let, var, etc.)
     // Only extract top-level variables (not inside functions/methods)
     else if (this.extractor.variableTypes.includes(nodeType) && !this.isInsideClassLikeNode()) {
       this.extractVariable(node);
+      // extractVariable doesn't walk every initializer shape (object literals
+      // are deliberately skipped; Python/Ruby don't walk at all), so scan the
+      // declaration subtree for function-as-value candidates — `const routes =
+      // { home: renderHome }`, `handlers = {"recv": target_cb}`. The scan halts
+      // at nested function definitions (their bodies are walked — and
+      // attributed — separately) and flush-time dedup absorbs any overlap with
+      // initializers extractVariable DOES walk.
+      this.scanFnRefSubtree(node, 0);
       skipChildren = true; // extractVariable handles children
     }
     // Swift stored properties inside a type. Swift instance properties aren't
@@ -645,6 +958,8 @@ export class TreeSitterExtractor {
         });
       }
     }
+
+    if (this.valueRefsEnabled) this.captureValueRefScope(kind, name, id, node);
 
     return newNode;
   }
@@ -1024,8 +1339,10 @@ export class TreeSitterExtractor {
     if (!this.extractor) return;
 
     // Skip forward declarations and type references (no body = not a definition)
+    // — EXCEPT C# positional records (`record struct M(decimal Amount);`),
+    // complete definitions with no body block. (#831)
     const body = getChildByField(node, this.extractor.bodyField);
-    if (!body) return;
+    if (!body && node.type !== 'record_declaration') return;
 
     const name = extractName(node, this.source, this.extractor);
     const docstring = getPrecedingDocstring(node, this.source);
@@ -1046,15 +1363,18 @@ export class TreeSitterExtractor {
     // `record struct M(decimal Amount)` which the grammar nests here).
     this.extractCsharpPrimaryCtorParamRefs(node, structNode.id);
 
-    // Push to stack for field extraction
-    this.nodeStack.push(structNode.id);
-    for (let i = 0; i < body.namedChildCount; i++) {
-      const child = body.namedChild(i);
-      if (child) {
-        this.visitNode(child);
+    // Push to stack for field extraction (bodiless positional records have
+    // no members to visit)
+    if (body) {
+      this.nodeStack.push(structNode.id);
+      for (let i = 0; i < body.namedChildCount; i++) {
+        const child = body.namedChild(i);
+        if (child) {
+          this.visitNode(child);
+        }
       }
+      this.nodeStack.pop();
     }
-    this.nodeStack.pop();
   }
 
   /**
@@ -1132,27 +1452,41 @@ export class TreeSitterExtractor {
    * Extract a class property declaration (e.g. C# `public string Name { get; set; }`).
    * Extracts as 'property' kind node inside the owning class.
    */
-  private extractProperty(node: SyntaxNode): void {
-    if (!this.extractor) return;
+  private extractProperty(node: SyntaxNode): Node | null {
+    if (!this.extractor) return null;
 
     const docstring = getPrecedingDocstring(node, this.source);
     const visibility = this.extractor.getVisibility?.(node);
     const isStatic = this.extractor.isStatic?.(node) ?? false;
 
     const hookName = this.extractor.extractPropertyName?.(node, this.source);
+    // JS `field_definition` names its key the `property` field (TS uses
+    // `name`) — try both before the generic identifier scan (#808).
     const nameNode = hookName
       ? null
-      : getChildByField(node, 'name') || node.namedChildren.find(c => c.type === 'identifier');
+      : getChildByField(node, 'name') ||
+        getChildByField(node, 'property') ||
+        node.namedChildren.find(c => c.type === 'identifier');
     const name = hookName ?? (nameNode ? getNodeText(nameNode, this.source) : null);
-    if (!name) return;
+    if (!name) return null;
 
-    // Get property type from the type child (first named child that isn't modifier or identifier)
-    const typeNode = node.namedChildren.find(
-      c => c.type !== 'modifier' && c.type !== 'modifiers'
-        && c.type !== 'identifier' && c.type !== 'accessor_list'
-        && c.type !== 'accessors' && c.type !== 'equals_value_clause'
-    );
-    const typeText = typeNode ? getNodeText(typeNode, this.source) : undefined;
+    // Get property type. TS/JS field definitions carry an explicit `type`
+    // field (a `type_annotation`); their other named children are the name
+    // and the initializer VALUE, which the generic finder below would
+    // wrongly pick — so fields use the type field only (#808). Other
+    // languages (C# property_declaration) keep the generic scan.
+    const isTsJsField =
+      node.type === 'public_field_definition' || node.type === 'field_definition';
+    const typeNode = isTsJsField
+      ? getChildByField(node, 'type')
+      : node.namedChildren.find(
+          c => c.type !== 'modifier' && c.type !== 'modifiers'
+            && c.type !== 'identifier' && c.type !== 'accessor_list'
+            && c.type !== 'accessors' && c.type !== 'equals_value_clause'
+        );
+    const typeText = typeNode
+      ? getNodeText(typeNode, this.source).replace(/^:\s*/, '')
+      : undefined;
     const signature = typeText ? `${typeText} ${name}` : name;
 
     const propNode = this.createNode('property', name, node, {
@@ -1171,6 +1505,7 @@ export class TreeSitterExtractor {
       // `type_annotation` children; the C# branch walks the `type` field.
       this.extractTypeAnnotations(node, propNode.id);
     }
+    return propNode;
   }
 
   /**
@@ -3086,6 +3421,10 @@ export class TreeSitterExtractor {
     const visitForCallsAndStructure = (node: SyntaxNode): void => {
       const nodeType = node.type;
 
+      // Function-as-value capture (#756) — function bodies are walked here,
+      // not in visitNode, so the capture hook must fire in both walkers.
+      this.maybeCaptureFnRefs(node, nodeType);
+
       // Rocket route-registration macros (`routes![…]` / `catchers![…]`): the
       // handler paths live in a raw token tree the call walker can't see.
       if (nodeType === 'macro_invocation') this.extractRustRouteMacro(node);
@@ -4461,8 +4800,16 @@ export class TreeSitterExtractor {
     for (let i = 0; i < node.namedChildCount; i++) {
       const child = node.namedChild(i);
       if (!child) continue;
+      // Function-as-value capture (#756): Pascal bodies are walked here, not
+      // in visitNode/visitForCallsAndStructure, so the capture hook fires here
+      // — assignment RHS is the Delphi event-wiring idiom (`OnFire := Handler`).
+      this.maybeCaptureFnRefs(child, child.type);
       if (child.type === 'exprCall') {
         this.extractPascalCall(child);
+        // The walker doesn't descend into a call's arguments — dispatch the
+        // argument container directly (`RegisterHandler(TargetCb)` / `(@Cb)`).
+        const args = child.namedChildren.find((c: SyntaxNode) => c.type === 'exprArgs');
+        if (args) this.maybeCaptureFnRefs(args, 'exprArgs');
       } else if (child.type === 'exprDot') {
         // A STATEMENT-level bare exprDot is a paren-less call (`Obj.Free;`,
         // `TFoo.GetInstance.DoIt;`). Anywhere else (assignment side, condition,
@@ -4511,6 +4858,10 @@ export function extractFromSource(
   } else if (detectedLanguage === 'vue') {
     // Use custom extractor for Vue
     const extractor = new VueExtractor(filePath, source);
+    result = extractor.extract();
+  } else if (detectedLanguage === 'astro') {
+    // Use custom extractor for Astro (frontmatter + template delegation)
+    const extractor = new AstroExtractor(filePath, source);
     result = extractor.extract();
   } else if (detectedLanguage === 'liquid') {
     // Use custom extractor for Liquid
