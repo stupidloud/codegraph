@@ -9,6 +9,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-06-17
+
 ### Breaking Changes
 
 - **Anonymous usage telemetry is disabled by default in this fork.** Upstream ships telemetry on-by-default with an opt-out; this `@stupidloud/codegraph` fork inverts that — nothing is recorded, no machine ID is minted, and no network requests are made unless you explicitly opt in. To turn telemetry on, run `codegraph telemetry on` or set `CODEGRAPH_TELEMETRY=1`. The endpoint, schema, and `DO_NOT_TRACK`/`CODEGRAPH_TELEMETRY` precedence are otherwise unchanged from upstream.
