@@ -106,20 +106,9 @@ export function validateConfig(config: unknown): config is CodeGraphConfig {
     if (s.apiKey !== undefined && typeof s.apiKey !== 'string') return false;
     if (s.model !== undefined && typeof s.model !== 'string') return false;
     if (s.batchSize !== undefined && typeof s.batchSize !== 'number') return false;
-    if (s.sqliteVssEnabled !== undefined && typeof s.sqliteVssEnabled !== 'boolean') return false;
-    if (s.sqliteVssProbe !== undefined) {
-      if (typeof s.sqliteVssProbe !== 'object' || s.sqliteVssProbe === null) return false;
-      const probe = s.sqliteVssProbe as Record<string, unknown>;
-      if (typeof probe.available !== 'boolean') return false;
-      if (typeof probe.checkedAt !== 'number') return false;
-      if (probe.loadablePaths !== undefined) {
-        if (typeof probe.loadablePaths !== 'object' || probe.loadablePaths === null) return false;
-        const paths = probe.loadablePaths as Record<string, unknown>;
-        if (typeof paths.vector !== 'string') return false;
-        if (typeof paths.vss !== 'string') return false;
-      }
-      if (probe.reason !== undefined && typeof probe.reason !== 'string') return false;
-    }
+    // Legacy sqlite-vss probe fields (sqliteVssEnabled/sqliteVssProbe) from
+    // older configs are tolerated and ignored — vector backing is now sqlite-vec,
+    // loaded at runtime with no persisted probe state.
   }
 
   return true;

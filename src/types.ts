@@ -539,18 +539,6 @@ export interface CodeGraphConfig {
      * clamped to that model's `maxBatchSize`.
      */
     batchSize?: number;
-    /** Whether sqlite-vss passed the init-time child-process probe */
-    sqliteVssEnabled?: boolean;
-    /** Diagnostic result from sqlite-vss init-time probing */
-    sqliteVssProbe?: {
-      available: boolean;
-      checkedAt: number;
-      loadablePaths?: {
-        vector: string;
-        vss: string;
-      };
-      reason?: string;
-    };
   };
 }
 

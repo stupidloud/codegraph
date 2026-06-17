@@ -9,7 +9,6 @@ import { SqliteDatabase } from '../db/sqlite-adapter';
 import { Node, SearchResult, SearchOptions } from '../types';
 import { TextEmbedder, createEmbedder, EmbedderOptions, EmbedderStatusUpdate } from './embedder';
 import { VectorSearchManager, createVectorSearch } from './search';
-import { SqliteVssLoadablePaths } from './sqlite-vss-probe';
 import { QueryBuilder } from '../db/queries';
 import { validatePathWithinRoot } from '../utils';
 import * as crypto from 'crypto';
@@ -46,9 +45,6 @@ export interface VectorManagerOptions {
 
   /** Batch size for embedding generation */
   batchSize?: number;
-
-  /** Init-probed sqlite-vss extension paths for ANN search */
-  sqliteVssLoadablePaths?: SqliteVssLoadablePaths;
 
   /**
    * Project root, used to read each node's source body for embedding. When
@@ -97,7 +93,6 @@ export class VectorManager {
     this.searchManager = createVectorSearch(
       db,
       this.embedder.getDimension(),
-      options.sqliteVssLoadablePaths,
       this.embedder.getModelId()
     );
     this.queries = queries;
@@ -157,7 +152,7 @@ export class VectorManager {
     // Initialize embedder configuration.
     await this.embedder.initialize();
 
-    // Initialize vector search (loads sqlite-vss if available)
+    // Initialize vector search (loads sqlite-vec if available)
     await this.searchManager.initialize();
 
     this.initialized = true;
@@ -179,6 +174,13 @@ export class VectorManager {
   async embedAllNodes(onProgress?: (progress: EmbeddingProgress) => void): Promise<number> {
     if (!this.initialized) {
       throw new Error('VectorManager not initialized. Call initialize() first.');
+    }
+
+    // No usable vector backend (sqlite-vec couldn't load on this platform /
+    // install) — skip embedding entirely so we don't spend embedding-API calls
+    // on vectors that have nowhere to be stored or queried.
+    if (!this.searchManager.isVecEnabled()) {
+      return 0;
     }
 
     // Get all nodes that should be embedded
@@ -407,12 +409,12 @@ export class VectorManager {
    */
   getStats(): {
     totalVectors: number;
-    vssEnabled: boolean;
+    vecEnabled: boolean;
     modelId: string;
   } {
     return {
       totalVectors: this.searchManager.getVectorCount(),
-      vssEnabled: this.searchManager.isVssEnabled(),
+      vecEnabled: this.searchManager.isVecEnabled(),
       modelId: this.embedder.getModelId(),
     };
   }
@@ -432,10 +434,10 @@ export class VectorManager {
   }
 
   /**
-   * Rebuild the VSS index
+   * Rebuild the vec0 index in place (no re-embedding).
    */
   rebuildIndex(): void {
-    this.searchManager.rebuildVssIndex();
+    this.searchManager.rebuildVecIndex();
   }
 
   /**

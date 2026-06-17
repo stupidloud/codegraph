@@ -30,6 +30,15 @@ export interface SqliteDatabase {
   transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T;
   close(): void;
   readonly open: boolean;
+  /**
+   * Load a SQLite loadable extension by filesystem path. The connection is
+   * constructed with `allowExtension: true`, which per node:sqlite is by itself
+   * sufficient — no separate `enableLoadExtension(true)` call is needed (this
+   * matches sqlite-vec's official `load(db)` helper, which only calls
+   * `db.loadExtension(path)`). Used by the vector-search layer to load
+   * sqlite-vec (`vec0`).
+   */
+  loadExtension(path: string): void;
 }
 
 /**
@@ -53,11 +62,19 @@ class NodeSqliteAdapter implements SqliteDatabase {
   constructor(dbPath: string) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { DatabaseSync } = require('node:sqlite');
-    this._db = new DatabaseSync(dbPath);
+    // `allowExtension: true` permits runtime loadable extensions (sqlite-vec's
+    // vec0) on this connection. It only *permits* — nothing is loaded unless
+    // the vector layer explicitly calls loadExtension() with the bundled
+    // sqlite-vec path, so the capability is inert for every non-semantic use.
+    this._db = new DatabaseSync(dbPath, { allowExtension: true });
   }
 
   get open(): boolean {
     return this._db.isOpen;
+  }
+
+  loadExtension(extPath: string): void {
+    this._db.loadExtension(extPath);
   }
 
   prepare(sql: string): SqliteStatement {

@@ -1831,7 +1831,12 @@ export class QueryBuilder {
     this.nodeCache.clear();
     this.db.transaction(() => {
       this.db.exec('DELETE FROM unresolved_refs');
-      this.db.exec('DELETE FROM vectors');
+      // Vectors are NOT cleared here: they live in the sqlite-vec store
+      // (vec0 + vec_map), which the vector layer owns and reconciles against
+      // the rebuilt graph via deleteStaleVectors() + content-hash reuse on the
+      // next embed pass. They also can't be dropped without the sqlite-vec
+      // extension loaded on this connection, which clear()'s caller (e.g. the
+      // CLI `index` full rebuild) doesn't guarantee.
       this.db.exec('DELETE FROM edges');
       this.db.exec('DELETE FROM nodes');
       this.db.exec('DELETE FROM files');

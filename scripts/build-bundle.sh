@@ -5,9 +5,11 @@
 # NO native build — node:sqlite is built into the bundled Node. One archive per
 # platform.
 #
-# Because dropping better-sqlite3 left zero native addons, the recipe is pure
-# file-packaging (download the target's Node, copy the app, archive) — so any
-# platform's bundle can be built on any OS. No cross-compile, no native runners.
+# The recipe is pure file-packaging (download the target's Node, copy the app,
+# archive) — so any platform's bundle can be built on any OS. No cross-compile,
+# no native runners. The one native artifact is sqlite-vec's `vec0` loadable
+# (semantic search): we don't compile it, we fetch the target platform's prebuilt
+# from npm and drop it in (step 3b), which keeps "build any target on any OS".
 #
 # Usage:
 #   scripts/build-bundle.sh <target> [node-version]
@@ -67,6 +69,38 @@ cp "$ROOT/package.json" "$ROOT/package-lock.json" "$STAGE/lib/"
 echo "[bundle] installing production dependencies"
 ( cd "$STAGE/lib" && npm ci --omit=dev --ignore-scripts >/dev/null 2>&1 )
 rm -f "$STAGE/lib/package-lock.json"
+
+# 3b. Vendor the TARGET platform's sqlite-vec native binary (vec0).
+#
+# sqlite-vec ships its vec0 loadable as per-platform npm packages
+# (sqlite-vec-<os>-<arch>) in its own optionalDependencies. `npm ci` above only
+# installs the BUILD HOST's platform package, so a cross-built bundle would
+# carry the wrong vec0 (or none) and semantic search would fail to load on the
+# target. Strip whatever host-platform package npm pulled in, then fetch the
+# target's tarball straight from the registry — bypassing npm's os/cpu host
+# filtering — and extract it into node_modules. require.resolve finds it as a
+# sibling of the sqlite-vec loader at runtime.
+VEC_LOADER="$STAGE/lib/node_modules/sqlite-vec"
+if [ -d "$VEC_LOADER" ]; then
+  rm -rf "$STAGE/lib/node_modules"/sqlite-vec-*   # drop host-platform package(s)
+  case "$OSFAM" in win32) VEC_OS=windows ;; *) VEC_OS="$OSFAM" ;; esac
+  VEC_PKG="sqlite-vec-${VEC_OS}-${ARCH}"
+  # Targets sqlite-vec prebuilds for. Anything else (e.g. win32-arm64) ships
+  # without vec0; the vector layer then disables semantic search gracefully.
+  SUPPORTED=" darwin-x64 darwin-arm64 linux-x64 linux-arm64 win32-x64 "
+  if [[ "$SUPPORTED" == *" ${TARGET} "* ]]; then
+    VEC_VER="$(node -p "require('$VEC_LOADER/package.json').version")"
+    VEC_URL="$(npm view "${VEC_PKG}@${VEC_VER}" dist.tarball)"
+    echo "[bundle] vendoring ${VEC_PKG}@${VEC_VER}"
+    curl -fsSL "$VEC_URL" -o "$WORK/vec.tgz"
+    rm -rf "$WORK/vecpkg" && mkdir -p "$WORK/vecpkg"
+    tar -xzf "$WORK/vec.tgz" -C "$WORK/vecpkg"          # npm tarball → vecpkg/package/
+    mkdir -p "$STAGE/lib/node_modules/${VEC_PKG}"
+    cp -R "$WORK/vecpkg/package/." "$STAGE/lib/node_modules/${VEC_PKG}/"
+  else
+    echo "[bundle] note: sqlite-vec has no prebuilt for ${TARGET}; bundling without vec0 (semantic search disabled there)"
+  fi
+fi
 
 # 4. Vendored Node + launcher (the launcher uses the bundled Node by relative
 #    path, so no system Node is ever needed).

@@ -12,7 +12,6 @@ import * as os from 'os';
 import CodeGraph from '../src/index';
 import { TextEmbedder } from '../src/vectors/embedder';
 import { VectorSearchManager, createVectorSearch } from '../src/vectors/search';
-import { probeSqliteVss } from '../src/vectors/sqlite-vss-probe';
 import { DatabaseConnection } from '../src/db';
 import { validateConfig } from '../src/config';
 
@@ -654,42 +653,6 @@ describe('Vector Embeddings', () => {
     });
   });
 
-  describe('sqlite-vss probe', () => {
-    it('should report sqlite-vss as available when the child probe exits successfully', () => {
-      const spawnSync = vi.fn().mockReturnValue({
-        status: 0,
-        signal: null,
-        output: [],
-        pid: 123,
-        stdout: JSON.stringify({ vector: '/tmp/vector0', vss: '/tmp/vss0' }),
-        stderr: '',
-      });
-
-      const result = probeSqliteVss(5000, spawnSync);
-
-      expect(result.available).toBe(true);
-      expect(result.checkedAt).toBeTypeOf('number');
-      expect(result.loadablePaths).toEqual({ vector: '/tmp/vector0', vss: '/tmp/vss0' });
-      expect(result.reason).toBeUndefined();
-    });
-
-    it('should report sqlite-vss as unavailable when the child probe is killed by SIGILL', () => {
-      const spawnSync = vi.fn().mockReturnValue({
-        status: null,
-        signal: 'SIGILL',
-        output: [],
-        pid: 123,
-        stdout: '',
-        stderr: '',
-      });
-
-      const result = probeSqliteVss(5000, spawnSync);
-
-      expect(result.available).toBe(false);
-      expect(result.reason).toContain('SIGILL');
-    });
-  });
-
   describe('VectorSearchManager', () => {
     let tempDir: string;
     let db: DatabaseConnection;
@@ -723,25 +686,23 @@ describe('Vector Embeddings', () => {
       expect(retrieved?.[0]).toBeCloseTo(0.1, 5);
     });
 
-    it('should skip sqlite-vss loading when disabled', async () => {
-      searchManager = createVectorSearch(db.getDb(), TEST_DIMENSION);
-
+    it('enables the sqlite-vec backend when the extension is available', async () => {
       await searchManager.initialize();
 
-      expect(searchManager.isVssEnabled()).toBe(false);
+      // The sqlite-vec optional dependency ships a prebuilt for the test
+      // platform (linux-x64 / darwin), so the backend loads.
+      expect(searchManager.isVecEnabled()).toBe(true);
     });
 
-    it('clears vectors when the configured model differs from stored rows (brute-force path)', async () => {
-      // Seed with rows from an old model — sqlite-vss is OFF here (no
-      // loadable paths passed), which is exactly the path the dim-parse
-      // version of this check used to miss.
+    it('clears vectors when the configured model differs from stored rows', async () => {
+      // Seed with rows from an old model.
       await searchManager.initialize();
       searchManager.storeVector('node1', new Float32Array([0.1, 0.2, 0.3]), 'old-model');
       searchManager.storeVector('node2', new Float32Array([0.4, 0.5, 0.6]), 'old-model');
       expect(searchManager.getVectorCount()).toBe(2);
 
       // Re-open the same DB configured for a new model — should wipe.
-      const fresh = createVectorSearch(db.getDb(), TEST_DIMENSION, undefined, 'new-model');
+      const fresh = createVectorSearch(db.getDb(), TEST_DIMENSION, 'new-model');
       await fresh.initialize();
 
       expect(fresh.getVectorCount()).toBe(0);
@@ -752,14 +713,14 @@ describe('Vector Embeddings', () => {
       searchManager.storeVector('node1', new Float32Array([0.1, 0.2, 0.3]), 'stable-model');
       expect(searchManager.getVectorCount()).toBe(1);
 
-      const fresh = createVectorSearch(db.getDb(), TEST_DIMENSION, undefined, 'stable-model');
+      const fresh = createVectorSearch(db.getDb(), TEST_DIMENSION, 'stable-model');
       await fresh.initialize();
 
       expect(fresh.getVectorCount()).toBe(1);
     });
 
-    it('is a no-op on an empty vectors table even when a model is configured', async () => {
-      const fresh = createVectorSearch(db.getDb(), TEST_DIMENSION, undefined, 'whatever-model');
+    it('is a no-op on an empty vector store even when a model is configured', async () => {
+      const fresh = createVectorSearch(db.getDb(), TEST_DIMENSION, 'whatever-model');
       await fresh.initialize();
 
       expect(fresh.getVectorCount()).toBe(0);
@@ -820,7 +781,7 @@ describe('Vector Embeddings', () => {
       expect(searchManager.getVectorCount()).toBe(0);
     });
 
-    it('should perform brute-force similarity search', async () => {
+    it('should perform vec0 similarity search', async () => {
       await searchManager.initialize();
 
       // Store some test vectors

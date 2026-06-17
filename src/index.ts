@@ -47,7 +47,6 @@ import {
 } from './resolution';
 import { GraphTraverser, GraphQueryManager } from './graph';
 import { VectorManager, createVectorManager, EmbeddingProgress } from './vectors';
-import { probeSqliteVss } from './vectors/sqlite-vss-probe';
 import { ContextBuilder, createContextBuilder } from './context';
 import { Mutex, FileLock } from './utils';
 import { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
@@ -208,9 +207,6 @@ export class CodeGraph {
         modelId: semantic.model,
       },
       batchSize: semantic.batchSize,
-      sqliteVssLoadablePaths: semantic.sqliteVssEnabled === true
-        ? semantic.sqliteVssProbe?.loadablePaths
-        : undefined,
       projectRoot: this.projectRoot,
     });
   }
@@ -245,7 +241,6 @@ export class CodeGraph {
     if (options.config) {
       Object.assign(config, options.config);
     }
-    this.probeSqliteVssForConfig(config);
     saveConfig(resolvedRoot, config);
 
     // Initialize database
@@ -282,7 +277,6 @@ export class CodeGraph {
     if (options.config) {
       Object.assign(config, options.config);
     }
-    this.probeSqliteVssForConfig(config);
     saveConfig(resolvedRoot, config);
 
     // Initialize database
@@ -291,20 +285,6 @@ export class CodeGraph {
     const queries = new QueryBuilder(db.getDb());
 
     return new CodeGraph(db, queries, resolvedRoot, config);
-  }
-
-  private static probeSqliteVssForConfig(config: CodeGraphConfig): void {
-    if (config.semanticSearch?.enabled !== true) {
-      return;
-    }
-
-    if (config.semanticSearch.sqliteVssEnabled !== undefined || config.semanticSearch.sqliteVssProbe !== undefined) {
-      return;
-    }
-
-    const result = probeSqliteVss();
-    config.semanticSearch.sqliteVssProbe = result;
-    config.semanticSearch.sqliteVssEnabled = result.available;
   }
 
   /**
@@ -1307,7 +1287,7 @@ export class CodeGraph {
    */
   getEmbeddingStats(): {
     totalVectors: number;
-    vssEnabled: boolean;
+    vecEnabled: boolean;
     modelId: string;
   } | null {
     if (!this.vectorManager) {

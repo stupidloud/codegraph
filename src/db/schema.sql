@@ -145,21 +145,13 @@ CREATE INDEX IF NOT EXISTS idx_unresolved_from_name ON unresolved_refs(from_node
 CREATE INDEX IF NOT EXISTS idx_edges_provenance ON edges(provenance);
 
 -- =============================================================================
--- Vector Storage (for future semantic search)
+-- Vector Storage (semantic search)
 -- =============================================================================
 
--- Vector embeddings for semantic search
--- Note: No foreign key constraint to allow standalone vector testing
--- The VectorManager handles node-vector relationship at the application level
-CREATE TABLE IF NOT EXISTS vectors (
-    node_id TEXT PRIMARY KEY,
-    embedding BLOB NOT NULL, -- Float32 array stored as blob
-    model TEXT NOT NULL, -- Model used to generate embedding
-    content_hash TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model);
+-- Embeddings live in the sqlite-vec `vec0` virtual table (`vec_items`) plus a
+-- sibling `vec_map` metadata table. Both are created at runtime by the vector
+-- layer (VectorSearchManager) because the vec0 dimension is model-dependent and
+-- the sqlite-vec extension must be loaded first. Nothing is declared here.
 
 -- Project metadata for version/provenance tracking
 CREATE TABLE IF NOT EXISTS project_metadata (

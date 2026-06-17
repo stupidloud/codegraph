@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 
 /**
  * Migration definition
@@ -115,6 +115,28 @@ const migrations: Migration[] = [
       db.exec(`
         ALTER TABLE nodes ADD COLUMN return_type TEXT;
       `);
+    },
+  },
+  {
+    version: 8,
+    description:
+      'Drop legacy sqlite-vss vector storage; embeddings now live in the sqlite-vec vec0 store created at runtime',
+    up: (db) => {
+      // The old node_id-keyed embedding BLOB table and the sqlite-vss rowid map
+      // are plain tables — safe to drop with no extension loaded. Embeddings
+      // re-materialize into vec0 on the next index/sync (semantic search is
+      // opt-in and these rows were wiped on every full `index` anyway).
+      db.exec('DROP TABLE IF EXISTS vectors;');
+      db.exec('DROP TABLE IF EXISTS vss_map;');
+      // vss_vectors is a `USING vss0` virtual table. On the node:sqlite backend
+      // it was never actually created (sqlite-vss can't load there), so this is
+      // a no-op; guard in case an old better-sqlite3-era DB carries one whose
+      // DROP would need the (now-absent) vss0 module.
+      try {
+        db.exec('DROP TABLE IF EXISTS vss_vectors;');
+      } catch {
+        // vss0 module absent — the orphaned shadow tables, if any, are inert.
+      }
     },
   },
 ];
