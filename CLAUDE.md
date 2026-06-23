@@ -202,18 +202,7 @@ For any Windows-specific PR, bug, or implementation, validate it on the real Win
 
 ## Releases
 
-This `@stupidloud/codegraph` fork publishes to npm with a **plain `npm publish`** of the root package (ships `dist` + `scripts` + READMEs; runs on the user's system Node per `engines`, no bundled runtime). It does **not** use upstream's GitHub Actions "Release" workflow — that workflow is disabled on the fork. `CHANGELOG.md` is the source of truth for what shipped.
-
-### Writing changelog entries
-
-**Default: write entries under `## [Unreleased]`** — that's the section reserved for work landing between releases. Don't pre-create a `## [X.Y.Z]` block; at release time you promote everything under `[Unreleased]` into a new `## [X.Y.Z] - <YYYY-MM-DD>` block by hand (see the release flow below).
-
-Formatting rules for any entry (anywhere — `[Unreleased]` or otherwise):
-
-1. **Write friendly, user-facing notes — not engineer-facing ones.** Group under `### New Features` and `### Fixes` (sentence-case). Surface `### Breaking Changes` and `### Security` as their own sections **only when the release has them**; fold improvement-flavored changes into New Features. Omit empty sections. (This replaces the old Keep-a-Changelog `Added/Changed/Fixed/Removed/Deprecated` grouping: the GitHub Release page extracts each version block **verbatim** via `scripts/extract-release-notes.mjs`, and the old dense, implementation-focused entries rendered as an unreadable wall of text — so the whole CHANGELOG was rewritten to this format and every published release re-noted to match.)
-2. **One plain-language sentence per bullet:** what changed and why it matters to a user. Lead with the capability, or with the symptom that's now fixed.
-3. **Strip the internals.** No internal file paths (`src/...`), no internal symbol / function / class names, no benchmark numbers / percentages / node-or-edge counts. **Keep:** language & framework names (Go, Spring, NestJS, …), things a user types or sets (`codegraph install`, `codegraph_explore`, the `CODEGRAPH_*` env vars), agent / IDE names (Claude Code, Cursor, opencode, Kiro, …), and a brief `Thanks @user` when a contributor is credited.
-4. Issue / PR references in entries are by number (`(#403)` etc.); the GitHub renderer auto-links them.
+This `@stupidloud/codegraph` fork publishes to npm with a **plain `npm publish`** of the root package (ships `dist` + `scripts` + READMEs; runs on the user's system Node per `engines`, no bundled runtime). It does **not** use upstream's GitHub Actions "Release" workflow — that workflow is disabled on the fork. **This fork does not maintain a `CHANGELOG.md`** (it was removed — upstream's changelog churn produced constant merge conflicts for no fork value); git history is the record of what shipped, and npm is the source of truth for what's released.
 
 ### Release flow
 
@@ -227,26 +216,23 @@ publish (`npm pub` / "发版" / "publish"), run these steps in order:
    pick the next free patch/minor.
 2. **Sync `package-lock.json`**: `npm install --package-lock-only --ignore-scripts`
    (rewrites the lock's version fields; no deps installed).
-3. **Promote the changelog**: move the whole `[Unreleased]` body verbatim into a
-   new `## [X.Y.Z] - <YYYY-MM-DD>` block (today's date), leaving an empty
-   `[Unreleased]` above it.
-4. **Build**: `npm run build` (there's no `prepublishOnly` hook, so the build
+3. **Build**: `npm run build` (there's no `prepublishOnly` hook, so the build
    must be current before publishing — `npm publish` ships whatever is in `dist/`).
-5. **Publish**: `npm publish` (the scope is already public from prior releases,
+4. **Publish**: `npm publish` (the scope is already public from prior releases,
    so no `--access public` needed).
-6. **Commit + push** the bump/changelog to the working branch and fast-forward
-   `main` to match, so on-disk truth matches what's on npm.
+5. **Commit + push** the bump to the working branch and fast-forward `main` to
+   match, so on-disk truth matches what's on npm.
 
 Optionally cut a matching GitHub Release/tag by hand, but npm is the source of
-truth for the fork — there is no automated GitHub Release.
+truth for the fork.
 
 ## House rules
 
-- The `0.7.x` line is in active multi-agent rollout. Any change to `src/installer/` (especially `targets/`) needs corresponding test coverage and a CHANGELOG entry — installer regressions break every new install silently.
+- The `0.7.x` line is in active multi-agent rollout. Any change to `src/installer/` (especially `targets/`) needs corresponding test coverage — installer regressions break every new install silently.
 - When changing what the MCP tools do or how agents should use them, edit `src/mcp/server-instructions.ts` — it is the **single source of truth** for agent-facing tool guidance (issue #529). The installer no longer writes a duplicate instructions block into `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` / `.cursor/rules/codegraph.mdc` / Kiro steering, so there's nothing to keep in sync anymore. (The repo's own checked-in `.cursor/rules/codegraph.mdc` is dogfooding config — update it too if you use Cursor on this repo, but it ships nowhere.)
 - CodeGraph provides **code context**, not product requirements. For new features, ask the user about UX, edge cases, and acceptance criteria — the graph won't tell you.
 - **When the user references issues, PR comments, or external reports, anchor them to a date and version before drawing conclusions.** Check the comment's `createdAt` against:
-  - The **last released version** — `grep -m1 '^## \[' CHANGELOG.md` shows the top-of-file version (older releases follow). A comment dated before the latest `## [X.Y.Z] - YYYY-MM-DD` is reacting to *released* state — work that's only on `main` or on an unmerged branch doesn't apply.
+  - The **last released version** — `npm view @stupidloud/codegraph version` (and `git tag` / git history for dates). A comment dated before the latest published version is reacting to *released* state — work that's only on `main` or on an unmerged branch doesn't apply.
   - The **last main commit** — `git log --first-parent main -1 --format='%ai %h %s'`. A comment after the last release but before a fix on main may already be addressed there but unreleased.
   - The **current branch's tip** — your own unmerged work obviously can't be what the comment is reacting to.
   Always disambiguate "released," "merged-but-unreleased," and "in-progress" before agreeing that a user-reported problem is unfixed (or that a fix is incomplete). A user saying "your fix only covers X" about a recent PR is usually pointing at the *released* shortcomings — your in-flight branch may already address them but they have no way to know that.
